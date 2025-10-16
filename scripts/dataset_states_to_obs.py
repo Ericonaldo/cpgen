@@ -65,6 +65,207 @@ from robomimic.envs.env_base import EnvBase
 
 import cpgen_envs
 
+
+def quaternion_to_rotation_matrix(quat):
+    """
+    Convert quaternion to rotation matrix.
+
+    Args:
+        quat: quaternion in format [qx, qy, qz, qw]
+
+    Returns:
+        3x3 rotation matrix
+    """
+    qx, qy, qz, qw = quat
+
+    R = np.array([
+        [1 - 2*(qy**2 + qz**2), 2*(qx*qy - qw*qz), 2*(qx*qz + qw*qy)],
+        [2*(qx*qy + qw*qz), 1 - 2*(qx**2 + qz**2), 2*(qy*qz - qw*qx)],
+        [2*(qx*qz - qw*qy), 2*(qy*qz + qw*qx), 1 - 2*(qx**2 + qy**2)]
+    ])
+
+    return R
+
+
+def rotation_matrix_to_quaternion(R):
+    """
+    Convert rotation matrix to quaternion.
+
+    Args:
+        R: 3x3 rotation matrix
+
+    Returns:
+        quaternion in format [qw, qx, qy, qz]
+    """
+    trace = np.trace(R)
+
+    if trace > 0:
+        s = 0.5 / np.sqrt(trace + 1.0)
+        qw = 0.25 / s
+        qx = (R[2, 1] - R[1, 2]) * s
+        qy = (R[0, 2] - R[2, 0]) * s
+        qz = (R[1, 0] - R[0, 1]) * s
+    elif R[0, 0] > R[1, 1] and R[0, 0] > R[2, 2]:
+        s = 2.0 * np.sqrt(1.0 + R[0, 0] - R[1, 1] - R[2, 2])
+        qw = (R[2, 1] - R[1, 2]) / s
+        qx = 0.25 * s
+        qy = (R[0, 1] + R[1, 0]) / s
+        qz = (R[0, 2] + R[2, 0]) / s
+    elif R[1, 1] > R[2, 2]:
+        s = 2.0 * np.sqrt(1.0 + R[1, 1] - R[0, 0] - R[2, 2])
+        qw = (R[0, 2] - R[2, 0]) / s
+        qx = (R[0, 1] + R[1, 0]) / s
+        qy = 0.25 * s
+        qz = (R[1, 2] + R[2, 1]) / s
+    else:
+        s = 2.0 * np.sqrt(1.0 + R[2, 2] - R[0, 0] - R[1, 1])
+        qw = (R[1, 0] - R[0, 1]) / s
+        qx = (R[0, 2] + R[2, 0]) / s
+        qy = (R[1, 2] + R[2, 1]) / s
+        qz = 0.25 * s
+
+    return np.array([qw, qx, qy, qz])
+
+
+def compute_tcp_pixel_data(h, w, tcp_pose, camera_extrinsics, camera_intrinsics):
+    """
+    Compute TCP pixel coordinates and direction vectors
+
+    Args:
+        h: image height
+        w: image width
+        tcp_pose: TCP pose as [x, y, z, qw, qx, qy, qz]
+        camera_extrinsics: 4x4 camera extrinsic matrix (world to camera)
+        camera_intrinsics: 3x3 camera intrinsic matrix
+
+    Returns:
+        Dict containing:
+        - tcp_pixel_coords: [u, v, depth]
+        - tcp_dir_x: [dir_x, dir_y] for X-axis
+        - tcp_dir_y: [dir_x, dir_y] for Y-axis
+        - tcp_dir_z: [dir_x, dir_y] for Z-axis
+        - tcp_pos: gripper position in camera frame
+        - tcp_orn: gripper orientation (rotation matrix) in camera frame (flattened)
+        - tcp_quat: gripper quaternion in camera frame [qw, qx, qy, qz]
+        - camera_intrinsics: camera intrinsic matrix
+        - camera_extrinsics: camera extrinsic matrix
+    """
+    try:
+        # Extract position and quaternion from TCP pose
+        gripper_pos = tcp_pose[:3]
+        gripper_quat = tcp_pose[3:]  # [qx, qy, qz, qw]
+
+        # Convert quaternion to rotation matrix
+        gripper_rot = quaternion_to_rotation_matrix(gripper_quat)
+
+        # Create gripper transformation matrix
+        gripper_transform = np.eye(4)
+        gripper_transform[:3, :3] = gripper_rot
+        gripper_transform[:3, 3] = gripper_pos
+
+        # Transform gripper pose to camera coordinates
+        world_to_camera = camera_extrinsics
+        gripper_in_camera = world_to_camera @ gripper_transform
+
+        # Project gripper position to image coordinates
+        gripper_pos_camera = gripper_in_camera[:3, 3]
+        gripper_orn_camera = gripper_in_camera[:3, :3]
+        # transform gripper_orn_camera to quaternion
+        gripper_quat_camera = rotation_matrix_to_quaternion(gripper_orn_camera)
+        depth = gripper_pos_camera[2]
+
+        if depth <= 0:  # Behind camera
+            return None
+
+        # Project to image plane
+        pixel_coords = camera_intrinsics @ gripper_pos_camera
+        pixel_coords = pixel_coords / pixel_coords[2]
+
+        u, v = int(pixel_coords[0]), int(pixel_coords[1])
+
+        # Check if coordinates are within image bounds
+        if not (0 <= u < w and 0 <= v < h):
+            return None
+
+        # Calculate direction vectors for X and Y axes
+        axis_length = 1
+
+        # Extract axes from rotation matrix in camera coordinates
+        x_axis_camera = gripper_in_camera[:3, 0] * axis_length
+        y_axis_camera = gripper_in_camera[:3, 1] * axis_length
+        z_axis_camera = gripper_in_camera[:3, 2] * axis_length
+
+        # Project axis endpoints
+        x_axis_end_camera = gripper_pos_camera + x_axis_camera
+        if x_axis_end_camera[2] <= 0:
+            if (gripper_pos_camera[2] > 0) and (x_axis_camera[2] < 0):
+                scale = gripper_pos_camera[2] / x_axis_camera[2]
+                x_axis_camera = x_axis_camera * scale
+                x_axis_end_camera = gripper_pos_camera + x_axis_camera * 0.99  # make sure in front of the camera
+        y_axis_end_camera = gripper_pos_camera + y_axis_camera
+        if y_axis_end_camera[2] <= 0:
+            if (gripper_pos_camera[2] > 0) and (y_axis_camera[2] < 0):
+                scale = gripper_pos_camera[2] / y_axis_camera[2]
+                y_axis_camera = y_axis_camera * scale
+                y_axis_end_camera = gripper_pos_camera + y_axis_camera * 0.99  # make sure in front of the camera
+        z_axis_end_camera = gripper_pos_camera + z_axis_camera
+        if z_axis_end_camera[2] <= 0:
+            if (gripper_pos_camera[2] > 0) and (z_axis_camera[2] < 0):
+                scale = gripper_pos_camera[2] / z_axis_camera[2]
+                z_axis_camera = z_axis_camera * scale
+                z_axis_end_camera = gripper_pos_camera + z_axis_camera * 0.99  # make sure in front of the camera
+
+        # Calculate direction vectors in image space
+        tcp_dir_x = np.array([0.0, 0.0])
+        tcp_dir_y = np.array([0.0, 0.0])
+        tcp_dir_z = np.array([0.0, 0.0])
+
+        # X-axis direction
+        if x_axis_end_camera[2] > 0:
+            x_axis_end_homogeneous = camera_intrinsics @ x_axis_end_camera
+            x_axis_end_homogeneous = x_axis_end_homogeneous / x_axis_end_homogeneous[2]
+
+            dir_x = x_axis_end_homogeneous[0] - u
+            dir_y = x_axis_end_homogeneous[1] - v
+
+            tcp_dir_x = np.array([dir_x, dir_y])
+
+        # Y-axis direction
+        if y_axis_end_camera[2] > 0:
+            y_axis_end_homogeneous = camera_intrinsics @ y_axis_end_camera
+            y_axis_end_homogeneous = y_axis_end_homogeneous / y_axis_end_homogeneous[2]
+
+            dir_x = y_axis_end_homogeneous[0] - u
+            dir_y = y_axis_end_homogeneous[1] - v
+
+            tcp_dir_y = np.array([dir_x, dir_y])
+
+        # Z-axis direction
+        if z_axis_end_camera[2] > 0:
+            z_axis_end_homogeneous = camera_intrinsics @ z_axis_end_camera
+            z_axis_end_homogeneous = z_axis_end_homogeneous / z_axis_end_homogeneous[2]
+
+            dir_x = z_axis_end_homogeneous[0] - u
+            dir_y = z_axis_end_homogeneous[1] - v
+
+            tcp_dir_z = np.array([dir_x, dir_y])
+
+        return {
+            'tcp_pixel_coords': np.array([u, v, depth], dtype=np.float32),
+            'tcp_dir_x': tcp_dir_x.astype(np.float32),
+            'tcp_dir_y': tcp_dir_y.astype(np.float32),
+            'tcp_dir_z': tcp_dir_z.astype(np.float32),
+            'tcp_pos': gripper_pos_camera.astype(np.float32),
+            'tcp_orn': gripper_orn_camera.reshape(-1).astype(np.float32),
+            'tcp_quat': gripper_quat_camera.astype(np.float32),  # [qw, qx, qy, qz]
+            # 'camera_intrinsics': camera_intrinsics.astype(np.float32),
+            # 'camera_extrinsics': camera_extrinsics.astype(np.float32)
+        }
+
+    except Exception as e:
+        return None
+
+
 def extract_trajectory(
     env, 
     initial_state, 
@@ -144,6 +345,94 @@ def extract_trajectory(
             # done = 1 when s' is task success state
             done = done or env.is_success()["task"]
         done = int(done)
+
+        # compute TCP pixel data if we have camera info
+        if camera_info is not None and camera_names is not None:
+            # Try to extract TCP pose from observation
+            # Robosuite typically has keys like "robot0_eef_pos" and "robot0_eef_quat"
+            tcp_pose = None
+            for key in obs.keys():
+                if "eef_pos" in key:
+                    pos_key = key
+                    # Find corresponding quaternion key
+                    quat_key = key.replace("_pos", "_quat")
+                    if quat_key in obs:
+                        # Combine position and quaternion into TCP pose
+                        tcp_pose = np.concatenate([obs[pos_key], obs[quat_key]])
+                        break
+
+            # If we found TCP pose, compute pixel data for each camera
+            if tcp_pose is not None:
+                for cam_name in camera_names:
+                    if cam_name in camera_info:
+                        K = np.array(camera_info[cam_name]["intrinsics"])
+                        R = np.array(camera_info[cam_name]["extrinsics"])
+
+                        if "eye_in_hand" in cam_name:
+                            tcp_data = compute_tcp_pixel_data(
+                                h=camera_height,
+                                w=camera_width,
+                                tcp_pose=R,
+                                camera_extrinsics=np.eye(4),
+                                camera_intrinsics=K
+                            )
+                        else:
+                            tcp_data = compute_tcp_pixel_data(
+                                h=camera_height,
+                                w=camera_width,
+                                tcp_pose=tcp_pose,
+                                camera_extrinsics=np.linalg.inv(R),
+                                camera_intrinsics=K
+                            )
+
+                        if tcp_data is not None:
+                            # Add TCP data to observation with camera-specific keys
+                            for data_key, data_val in tcp_data.items():
+                                obs_key = f"{cam_name}_{data_key}"
+                                obs[obs_key] = data_val
+                                # Also add to next_obs
+                                # For next_obs, we need to compute with next_obs's TCP pose
+                                pass  # Will compute next_obs TCP data separately
+
+        # Also compute TCP pixel data for next_obs
+        if camera_info is not None and camera_names is not None:
+            tcp_pose_next = None
+            for key in next_obs.keys():
+                if "eef_pos" in key:
+                    pos_key = key
+                    quat_key = key.replace("_pos", "_quat")
+                    if quat_key in next_obs:
+                        tcp_pose_next = np.concatenate([next_obs[pos_key], next_obs[quat_key]])
+                        break
+
+            if tcp_pose_next is not None:
+                for cam_name in camera_names:
+                    if cam_name in camera_info:
+                        K = np.array(camera_info[cam_name]["intrinsics"])
+                        R = np.array(camera_info[cam_name]["extrinsics"])
+
+
+                        if "eye_in_hand" in cam_name:
+                            tcp_data_next = compute_tcp_pixel_data(
+                                h=camera_height,
+                                w=camera_width,
+                                tcp_pose=R,
+                                camera_extrinsics=np.eye(4),
+                                camera_intrinsics=K
+                            )
+                        else:
+                            tcp_data_next = compute_tcp_pixel_data(
+                                h=camera_height,
+                                w=camera_width,
+                                tcp_pose=tcp_pose_next,
+                                camera_extrinsics=np.linalg.inv(R),
+                                camera_intrinsics=K
+                            )
+
+                        if tcp_data_next is not None:
+                            for data_key, data_val in tcp_data_next.items():
+                                obs_key = f"{cam_name}_{data_key}"
+                                next_obs[obs_key] = data_val
 
         # collect transition
         traj["obs"].append(obs)
@@ -400,14 +689,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--camera_height",
         type=int,
-        default=84,
+        default=256,
         help="(optional) height of image observations",
     )
 
     parser.add_argument(
         "--camera_width",
         type=int,
-        default=84,
+        default=256,
         help="(optional) width of image observations",
     )
 
