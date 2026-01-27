@@ -1,0 +1,8 @@
+# 屏蔽大文件和二进制
+models/
+demo_aug/
+*.egg-info/
+__pycache__/
+
+# 屏蔽 Git 历史
+.git/

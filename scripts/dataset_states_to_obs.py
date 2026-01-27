@@ -65,6 +65,10 @@ from robomimic.envs.env_base import EnvBase
 
 import cpgen_envs
 
+# Multi-view camera support
+from demo_aug.configs.multi_view_config import MultiViewCameraConfig, ThirdViewCameraConfig
+from demo_aug.envs.wrapper.multi_view_wrapper import MultiViewEnvWrapper
+
 
 def quaternion_to_rotation_matrix(quat):
     """
@@ -525,6 +529,28 @@ def dataset_states_to_obs(args):
         use_depth_obs=args.depth,
     )
 
+    # Wrap with multi-view if enabled
+    if args.enable_multi_view:
+        multi_view_config = MultiViewCameraConfig(
+            num_third_views=args.num_third_views,
+            keep_original_agentview=True,
+            keep_wrist_camera=True,
+            third_view_config=ThirdViewCameraConfig(
+                target=tuple(args.multi_view_target),
+                azimuth_range=tuple(args.multi_view_azimuth_range),
+                elevation_range=tuple(args.multi_view_elevation_range),
+                distance_range=tuple(args.multi_view_distance_range),
+                width=args.camera_width,
+                height=args.camera_height,
+            ),
+            min_angular_separation=args.multi_view_min_separation,
+            seed=args.multi_view_seed,
+        )
+        env = MultiViewEnvWrapper(env, multi_view_config)
+        # Update camera names to include all views
+        args.camera_names = env.camera_names
+        print(f"Multi-view enabled with cameras: {env.camera_names}")
+
     print("==== Using environment with the following metadata ====")
     print(json.dumps(env.serialize(), indent=4))
     print("")
@@ -745,6 +771,59 @@ if __name__ == "__main__":
         "--compress", 
         action='store_true',
         help="(optional) compress observations with gzip option in hdf5",
+    )
+
+    # ========== Multi-view camera options ==========
+    parser.add_argument(
+        "--enable_multi_view",
+        action="store_true",
+        help="Enable multi-view data collection with additional cameras",
+    )
+    parser.add_argument(
+        "--num_third_views",
+        type=int,
+        default=4,
+        help="Number of additional third-person view cameras (default: 4)",
+    )
+    parser.add_argument(
+        "--multi_view_seed",
+        type=int,
+        default=None,
+        help="Seed for reproducible camera pose sampling",
+    )
+    parser.add_argument(
+        "--multi_view_target",
+        type=float,
+        nargs=3,
+        default=[0.0, 0.0, 0.8],
+        help="Target point for cameras to look at (x, y, z)",
+    )
+    parser.add_argument(
+        "--multi_view_azimuth_range",
+        type=float,
+        nargs=2,
+        default=[-45.0, 45.0],
+        help="Azimuth angle range in degrees (min, max)",
+    )
+    parser.add_argument(
+        "--multi_view_elevation_range",
+        type=float,
+        nargs=2,
+        default=[20.0, 60.0],
+        help="Elevation angle range in degrees (min, max)",
+    )
+    parser.add_argument(
+        "--multi_view_distance_range",
+        type=float,
+        nargs=2,
+        default=[0.8, 1.5],
+        help="Distance range from target in meters (min, max)",
+    )
+    parser.add_argument(
+        "--multi_view_min_separation",
+        type=float,
+        default=30.0,
+        help="Minimum angular separation between views in degrees",
     )
 
     args = parser.parse_args()
