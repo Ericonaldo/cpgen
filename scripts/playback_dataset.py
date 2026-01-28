@@ -77,8 +77,14 @@ from robomimic.envs.env_base import EnvBase, EnvType
 import cpgen_envs
 
 # Multi-view camera support
-from demo_aug.configs.multi_view_config import MultiViewCameraConfig, ThirdViewCameraConfig
+from demo_aug.configs.multi_view_config import (
+    MultiViewCameraConfig,
+    ThirdViewCameraConfig,
+    add_multi_view_args,
+    create_config_from_args,
+)
 from demo_aug.envs.wrapper.multi_view_wrapper import MultiViewEnvWrapper
+from demo_aug.utils.robosuite_utils import refactor_composite_controller_config
 
 # Define default cameras to use for each env type
 DEFAULT_CAMERAS = {
@@ -273,27 +279,23 @@ def playback_dataset(args):
         ObsUtils.initialize_obs_utils_with_obs_specs(obs_modality_specs=dummy_spec)
 
         env_meta = FileUtils.get_env_metadata_from_dataset(dataset_path=args.dataset)
+
+        # Convert old controller config (robosuite 1.4) to new format (robosuite 1.5+)
+        # This handles compatibility with datasets recorded using older robosuite versions
+        if "controller_configs" in env_meta.get("env_kwargs", {}):
+            env_meta["env_kwargs"]["controller_configs"] = refactor_composite_controller_config(
+                env_meta["env_kwargs"]["controller_configs"],
+                robot_type="panda",
+                arms=["right"],
+            )
+
         env = EnvUtils.create_env_from_metadata(
             env_meta=env_meta, render=args.render, render_offscreen=write_video
         )
 
         # Wrap with multi-view if enabled
-        if args.enable_multi_view:
-            multi_view_config = MultiViewCameraConfig(
-                num_third_views=args.num_third_views,
-                keep_original_agentview=True,
-                keep_wrist_camera=True,
-                third_view_config=ThirdViewCameraConfig(
-                    target=tuple(args.multi_view_target),
-                    azimuth_range=tuple(args.multi_view_azimuth_range),
-                    elevation_range=tuple(args.multi_view_elevation_range),
-                    distance_range=tuple(args.multi_view_distance_range),
-                    width=args.multi_view_image_size,
-                    height=args.multi_view_image_size,
-                ),
-                min_angular_separation=args.multi_view_min_separation,
-                seed=args.multi_view_seed,
-            )
+        multi_view_config = create_config_from_args(args)
+        if multi_view_config is not None:
             env = MultiViewEnvWrapper(env, multi_view_config)
             # Update camera names to include all views
             args.render_image_names = env.camera_names
@@ -308,7 +310,7 @@ def playback_dataset(args):
                     height=args.multi_view_image_size,
                     width=args.multi_view_image_size,
                 )
-                print(f"✓ Camera preview saved to {args.multi_view_preview_path}")
+                print(f"[OK] Camera preview saved to {args.multi_view_preview_path}")
                 print("  Review the preview to ensure views are suitable for learning.")
 
         # some operations for playback are robosuite-specific, so determine if this environment is a robosuite env
@@ -588,70 +590,8 @@ if __name__ == "__main__":
         help="(optional) path to save the new demo with injected action noise",
     )
 
-    # ========== Multi-view camera options ==========
-    parser.add_argument(
-        "--enable_multi_view",
-        action="store_true",
-        help="Enable multi-view data collection with additional cameras",
-    )
-    parser.add_argument(
-        "--num_third_views",
-        type=int,
-        default=4,
-        help="Number of additional third-person view cameras (default: 4)",
-    )
-    parser.add_argument(
-        "--multi_view_seed",
-        type=int,
-        default=None,
-        help="Seed for reproducible camera pose sampling",
-    )
-    parser.add_argument(
-        "--multi_view_target",
-        type=float,
-        nargs=3,
-        default=[0.0, 0.0, 0.8],
-        help="Target point for cameras to look at (x, y, z)",
-    )
-    parser.add_argument(
-        "--multi_view_azimuth_range",
-        type=float,
-        nargs=2,
-        default=[-45.0, 45.0],
-        help="Azimuth angle range in degrees (min, max)",
-    )
-    parser.add_argument(
-        "--multi_view_elevation_range",
-        type=float,
-        nargs=2,
-        default=[20.0, 60.0],
-        help="Elevation angle range in degrees (min, max)",
-    )
-    parser.add_argument(
-        "--multi_view_distance_range",
-        type=float,
-        nargs=2,
-        default=[0.8, 1.5],
-        help="Distance range from target in meters (min, max)",
-    )
-    parser.add_argument(
-        "--multi_view_min_separation",
-        type=float,
-        default=30.0,
-        help="Minimum angular separation between views in degrees",
-    )
-    parser.add_argument(
-        "--multi_view_image_size",
-        type=int,
-        default=256,
-        help="Image size for multi-view cameras (height and width)",
-    )
-    parser.add_argument(
-        "--multi_view_preview_path",
-        type=str,
-        default=None,
-        help="(optional) Path to save camera preview image for human validation",
-    )
+    # Multi-view camera options (centralized in multi_view_config.py)
+    add_multi_view_args(parser)
 
     args = parser.parse_args()
     # playback_dataset(args)
@@ -661,3 +601,4 @@ if __name__ == "__main__":
     playback_dataset(args)
     b = time.time()
     print(f"Total time taken: {b-a}")
+

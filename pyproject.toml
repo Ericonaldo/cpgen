@@ -36,7 +36,7 @@ dependencies = [
     "trimesh",
     "usd-core",  # for curobo
     "openai",  # for llm demo seg queries
-    "mujoco==3.2.6"
+    "mujoco>=3.3.0"
 ]
 
 [project.optional-dependencies]

@@ -9,6 +9,8 @@ import robomimic.utils.obs_utils as ObsUtils
 from robomimic.config import config_factory
 from scipy.spatial.transform import Rotation
 
+from demo_aug.utils.robosuite_utils import get_robot_controller, get_robot_eef_site_name
+
 
 # Monkey patch robomimic get_camera_info to use v1.5.0
 def get_camera_info(
@@ -39,10 +41,9 @@ def get_camera_info(
         if "eye_in_hand" in cam_name:
             # convert extrinsic matrix to be relative to robot eef control frame
             assert cam_name.startswith("robot0")
-            eef_site_name = (
-                env.base_env.robots[0]
-                .composite_controller.part_controllers["right"]
-                .ref_name
+            # Use version-aware accessor (handles robosuite 1.4 vs 1.5+)
+            eef_site_name = get_robot_eef_site_name(
+                env.base_env.robots[0], robot_ind=0, arm="right"
             )
             eef_pos = np.array(
                 env.base_env.sim.data.site_xpos[
@@ -230,7 +231,8 @@ class RobomimicAbsoluteActionConverter:
                 robot.control(stacked_actions[i, idx], policy_step=True)
 
                 # read pos and ori from robots
-                controller = robot.controller
+                # Use version-aware controller accessor (handles robosuite 1.4 vs 1.5+)
+                controller = get_robot_controller(robot, arm="right")
                 action_goal_pos[i, idx] = controller.goal_pos
                 action_goal_ori[i, idx] = Rotation.from_matrix(
                     controller.goal_ori

@@ -69,6 +69,10 @@ from demo_aug.envs.motion_planners.indexed_configuration import IndexedConfigura
 from demo_aug.utils.file_utils import count_total_demos, merge_demo_files
 from demo_aug.utils.logging_utils import setup_file_logger
 from demo_aug.utils.mathutils import make_pose, random_pose
+from demo_aug.utils.robosuite_utils import (
+    refactor_composite_controller_config,
+    set_controller_config_absolute,
+)
 
 # simulation framework  # mainly for version checking at the moment
 from demo_aug.utils.mujoco_utils import (
@@ -4416,8 +4420,18 @@ def main(cfg: Config):
     )
     ObsUtils.initialize_obs_utils_with_obs_specs(obs_modality_specs=dummy_spec)
     env_meta = FileUtils.get_env_metadata_from_dataset(dataset_path=cfg.demo_path)
-    # update controller config to use abs actions
-    env_meta["env_kwargs"]["controller_configs"]["control_delta"] = False
+
+    # Convert old controller config to new format if needed, then set to absolute actions
+    # This handles compatibility between robosuite 1.4 and 1.5+
+    if "controller_configs" in env_meta["env_kwargs"]:
+        env_meta["env_kwargs"]["controller_configs"] = refactor_composite_controller_config(
+            env_meta["env_kwargs"]["controller_configs"],
+            robot_type="panda",
+            arms=["right"],
+        )
+        env_meta["env_kwargs"]["controller_configs"] = set_controller_config_absolute(
+            env_meta["env_kwargs"]["controller_configs"]
+        )
     if cfg.debug:
         env_meta["env_kwargs"]["use_camera_obs"] = False
         env_meta["env_kwargs"]["has_offscreen_renderer"] = True

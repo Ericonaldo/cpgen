@@ -837,7 +837,7 @@ def call_segmenter_api_llm_e2e(
     # Step 3: Extract final JSON segment list using regex
     json_match = re.search(r"```json(.*?)```", output_text, re.DOTALL)
     if not json_match:
-        print("❌ Could not find a valid JSON code block in LLM output.")
+        print("[ERROR] Could not find a valid JSON code block in LLM output.")
         return output_text, None
 
     json_text = json_match.group(1).strip()
@@ -857,7 +857,7 @@ def call_segmenter_api_llm_e2e(
         skill_segments = [seg for seg in segments if seg["label"] == "skill"]
         if len(skill_segments) != len(interactions_lst):
             print(
-                f"⚠️ Warning: Number of skill segments ({len(skill_segments)}) "
+                f"[WARNING] Warning: Number of skill segments ({len(skill_segments)}) "
                 f"does not match number of interactions ({len(interactions_lst)})"
             )
             return None
@@ -873,7 +873,7 @@ def call_segmenter_api_llm_e2e(
         segments = formatted_segments
         return segments
     except json.JSONDecodeError as e:
-        print("❌ JSON parsing failed:", e)
+        print("[ERROR] JSON parsing failed:", e)
         return None
 
 
@@ -943,7 +943,7 @@ def run_llm_e2e_segmentation(
     )
 
     if segments is None:
-        print("❌ Segmentation failed.")
+        print("[ERROR] Segmentation failed.")
         return None
 
     return segments
@@ -1068,7 +1068,7 @@ def call_segmenter_api_llm_success(
     # Step 3: Extract final JSON segment list using regex
     json_match = re.search(r"```json(.*?)```", output_text, re.DOTALL)
     if not json_match:
-        print("❌ Could not find a valid JSON code block in LLM output.")
+        print("[ERROR] Could not find a valid JSON code block in LLM output.")
         return output_text, None
 
     json_text = json_match.group(1).strip()
@@ -1092,7 +1092,7 @@ def call_segmenter_api_llm_success(
         # First, ensure the number of skill segments matches the number of interactions
         if len(formatted_segments) != len(interactions_lst):
             print(
-                f"⚠️ Warning: Number of subtask segments ({len(formatted_segments)}) "
+                f"[WARNING] Warning: Number of subtask segments ({len(formatted_segments)}) "
                 f"does not match number of interactions ({len(interactions_lst)})"
             )
             return None
@@ -1104,7 +1104,7 @@ def call_segmenter_api_llm_success(
         segments = formatted_segments
         return segments
     except json.JSONDecodeError as e:
-        print("❌ JSON parsing failed:", e)
+        print("[ERROR] JSON parsing failed:", e)
         return None
 
 
@@ -1215,7 +1215,7 @@ def run_llm_success_segmentation(
     )
 
     if segments is None:
-        print("❌ Segmentation failed.")
+        print("[ERROR] Segmentation failed.")
         return None
 
     return segments
@@ -1320,7 +1320,7 @@ def call_segmenter_api_llm_ends_then_starts(
     # Step 4: Extract JSON from code block
     json_match = re.search(r"```json(.*?)```", output_text, re.DOTALL)
     if not json_match:
-        print("❌ Could not find a valid JSON code block in LLM output.")
+        print("[ERROR] Could not find a valid JSON code block in LLM output.")
         return None
 
     json_text = json_match.group(1).strip()
@@ -1342,13 +1342,13 @@ def call_segmenter_api_llm_ends_then_starts(
         # Check count matches your subtask count
         if len(formatted_segments) != len(interactions_lst):
             print(
-                f"⚠️ # of segments {len(formatted_segments)} != # interactions {len(interactions_lst)}"
+                f"[WARNING] # of segments {len(formatted_segments)} != # interactions {len(interactions_lst)}"
             )
 
         return formatted_segments
 
     except json.JSONDecodeError as e:
-        print("❌ JSON parsing failed:", e)
+        print("[ERROR] JSON parsing failed:", e)
         return None
 
 
@@ -1410,7 +1410,7 @@ def run_llm_two_phase_single_prompt(
     )
 
     if segments is None:
-        print("❌ Could not parse subtask segmentation.")
+        print("[ERROR] Could not parse subtask segmentation.")
         return None
 
     # # 3) (Optional) Save segment videos from (start, end)

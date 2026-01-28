@@ -14,6 +14,7 @@ The default ranges are calibrated based on the existing 'agentview' camera, whic
 to provide good visibility for learning tasks.
 """
 
+import argparse
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Optional
 
@@ -327,31 +328,31 @@ def validate_camera_ranges(config: ThirdViewCameraConfig) -> List[str]:
     # Check azimuth (staying frontal)
     if config.azimuth_range[0] < -90 or config.azimuth_range[1] > 90:
         warnings.append(
-            f"⚠️ Azimuth range {config.azimuth_range} extends beyond ±90°. "
+            f"[WARNING] Azimuth range {config.azimuth_range} extends beyond +/-90 deg. "
             "This may cause robot body to occlude the workspace."
         )
     
     # Check elevation (staying above table)
     if config.elevation_range[0] < 15:
         warnings.append(
-            f"⚠️ Minimum elevation {config.elevation_range[0]}° is very low. "
+            f"[WARNING] Minimum elevation {config.elevation_range[0]} deg is very low. "
             "This may cause objects on table to occlude each other."
         )
     if config.elevation_range[1] > 80:
         warnings.append(
-            f"⚠️ Maximum elevation {config.elevation_range[1]}° is very high. "
+            f"[WARNING] Maximum elevation {config.elevation_range[1]} deg is very high. "
             "Top-down views may make depth perception difficult."
         )
     
     # Check distance (not too close/far)
     if config.distance_range[0] < 0.6:
         warnings.append(
-            f"⚠️ Minimum distance {config.distance_range[0]}m is very close. "
+            f"[WARNING] Minimum distance {config.distance_range[0]}m is very close. "
             "Gripper may frequently occlude the target."
         )
     if config.distance_range[1] > 2.5:
         warnings.append(
-            f"⚠️ Maximum distance {config.distance_range[1]}m is quite far. "
+            f"[WARNING] Maximum distance {config.distance_range[1]}m is quite far. "
             "Objects may appear very small in the image."
         )
     
@@ -389,6 +390,125 @@ def print_config_summary(config: MultiViewCameraConfig) -> None:
             print(f"  {w}")
     else:
         print()
-        print("✓ Configuration looks good for avoiding occlusions")
+        print("[OK] Configuration looks good for avoiding occlusions")
     
     print("=" * 60)
+
+
+# =============================================================================
+# CLI Argument Helpers
+# =============================================================================
+
+def add_multi_view_args(parser: argparse.ArgumentParser) -> None:
+    """Add multi-view camera arguments to an argument parser.
+    
+    This centralizes all multi-view CLI argument definitions to avoid
+    duplication across scripts.
+    
+    Args:
+        parser: ArgumentParser to add arguments to
+    """
+    group = parser.add_argument_group('Multi-view camera options')
+    group.add_argument(
+        "--enable_multi_view",
+        action="store_true",
+        help="Enable multi-view data collection with additional cameras",
+    )
+    group.add_argument(
+        "--num_third_views",
+        type=int,
+        default=4,
+        help="Number of additional third-person view cameras (default: 4)",
+    )
+    group.add_argument(
+        "--multi_view_seed",
+        type=int,
+        default=None,
+        help="Seed for reproducible camera pose sampling",
+    )
+    group.add_argument(
+        "--multi_view_target",
+        type=float,
+        nargs=3,
+        default=[0.0, 0.0, 0.8],
+        help="Target point for cameras to look at (x, y, z)",
+    )
+    group.add_argument(
+        "--multi_view_azimuth_range",
+        type=float,
+        nargs=2,
+        default=[-45.0, 45.0],
+        help="Azimuth angle range in degrees (min, max)",
+    )
+    group.add_argument(
+        "--multi_view_elevation_range",
+        type=float,
+        nargs=2,
+        default=[25.0, 55.0],
+        help="Elevation angle range in degrees (min, max)",
+    )
+    group.add_argument(
+        "--multi_view_distance_range",
+        type=float,
+        nargs=2,
+        default=[1.0, 1.6],
+        help="Distance range from target in meters (min, max)",
+    )
+    group.add_argument(
+        "--multi_view_min_separation",
+        type=float,
+        default=20.0,
+        help="Minimum angular separation between views in degrees",
+    )
+    group.add_argument(
+        "--multi_view_image_size",
+        type=int,
+        default=256,
+        help="Image size for multi-view cameras (height and width)",
+    )
+    group.add_argument(
+        "--multi_view_preview_path",
+        type=str,
+        default=None,
+        help="(optional) Path to save camera preview image for human validation",
+    )
+
+
+def create_config_from_args(
+    args,
+    image_height: Optional[int] = None,
+    image_width: Optional[int] = None,
+) -> Optional[MultiViewCameraConfig]:
+    """Create MultiViewCameraConfig from parsed command-line arguments.
+    
+    Args:
+        args: Parsed argparse namespace with multi-view arguments
+        image_height: Override image height (uses args.multi_view_image_size if None)
+        image_width: Override image width (uses args.multi_view_image_size if None)
+        
+    Returns:
+        MultiViewCameraConfig if multi-view enabled, None otherwise
+    """
+    if not getattr(args, 'enable_multi_view', False):
+        return None
+    
+    # Use provided sizes or fall back to multi_view_image_size
+    height = image_height or getattr(args, 'multi_view_image_size', 256)
+    width = image_width or getattr(args, 'multi_view_image_size', 256)
+    
+    return MultiViewCameraConfig(
+        num_third_views=args.num_third_views,
+        keep_original_agentview=True,
+        keep_wrist_camera=True,
+        third_view_config=ThirdViewCameraConfig(
+            target=tuple(args.multi_view_target),
+            azimuth_range=tuple(args.multi_view_azimuth_range),
+            elevation_range=tuple(args.multi_view_elevation_range),
+            distance_range=tuple(args.multi_view_distance_range),
+            width=width,
+            height=height,
+        ),
+        min_angular_separation=args.multi_view_min_separation,
+        seed=args.multi_view_seed,
+    )
+
