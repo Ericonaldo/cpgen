@@ -73,6 +73,10 @@ from demo_aug.configs.multi_view_config import (
     create_config_from_args,
 )
 from demo_aug.envs.wrapper.multi_view_wrapper import MultiViewEnvWrapper
+from demo_aug.utils.robosuite_utils import (
+    is_robosuite_v15_or_later,
+    refactor_composite_controller_config,
+)
 
 
 def quaternion_to_rotation_matrix(quat):
@@ -296,10 +300,10 @@ def extract_trajectory(
         states (np.array): array of simulation states to load to extract information
         actions (np.array): array of actions
         done_mode (int): how to write done signal. If 0, done is 1 whenever s' is a 
-            success state. If 1, done is 1 at the end of each trajectory. 
+            success state. If 1, done is 1 at the end of each trajectory.
             If 2, do both.
     """
-    assert isinstance(env, EnvBase)
+    assert isinstance(env, (EnvBase, MultiViewEnvWrapper))
     assert states.shape[0] == actions.shape[0]
 
     # load the initial state
@@ -329,8 +333,70 @@ def extract_trajectory(
         traj["actions_abs"] = np.array(actions_abs)
     
     traj_len = states.shape[0]
+
+    # Identify eye-in-hand cameras — these need fresh world-frame extrinsics
+    # each timestep because the camera moves with the robot arm.
+    # camera_info stores EEF-relative extrinsics for eye-in-hand cameras,
+    # which is correct for saving to HDF5 but NOT for TCP projection.
+    eye_in_hand_cameras = set()
+    if camera_names is not None:
+        for cam_name in camera_names:
+            if "eye_in_hand" in cam_name:
+                eye_in_hand_cameras.add(cam_name)
+
+    def _compute_tcp_for_obs(observation):
+        """Compute TCP pixel data for an observation using current sim state.
+
+        For all cameras (fixed and eye-in-hand), TCP data is computed in camera
+        frame using world-frame extrinsics. Eye-in-hand cameras get fresh
+        extrinsics from the simulator each call (since the camera moves with
+        the arm), while fixed cameras use cached extrinsics from camera_info.
+        """
+        if camera_info is None or camera_names is None:
+            return
+
+        # Extract TCP pose [x, y, z, qw, qx, qy, qz] from observation
+        tcp_pose = None
+        for key in observation.keys():
+            if "eef_pos" in key:
+                quat_key = key.replace("_pos", "_quat")
+                if quat_key in observation:
+                    tcp_pose = np.concatenate([observation[key], observation[quat_key]])
+                    break
+
+        if tcp_pose is None:
+            return
+
+        for cam_name in camera_names:
+            if cam_name not in camera_info:
+                continue
+            K = np.array(camera_info[cam_name]["intrinsics"])
+
+            if cam_name in eye_in_hand_cameras:
+                # Get fresh world-frame extrinsics (camera-to-world) from sim
+                R_world = env.get_camera_extrinsic_matrix(camera_name=cam_name)
+            else:
+                # Fixed camera: cached extrinsics are already world-frame
+                R_world = np.array(camera_info[cam_name]["extrinsics"])
+
+            # inv(R_world) = world-to-camera transform
+            tcp_data = compute_tcp_pixel_data(
+                h=camera_height,
+                w=camera_width,
+                tcp_pose=tcp_pose,
+                camera_extrinsics=np.linalg.inv(R_world),
+                camera_intrinsics=K,
+            )
+
+            if tcp_data is not None:
+                for data_key, data_val in tcp_data.items():
+                    observation[f"{cam_name}_{data_key}"] = data_val
+
     # iteration variable @t is over "next obs" indices
     for t in range(1, traj_len + 1):
+
+        # Compute TCP for obs BEFORE advancing state so sim matches obs
+        _compute_tcp_for_obs(obs)
 
         # get next observation
         if t == traj_len:
@@ -355,93 +421,8 @@ def extract_trajectory(
             done = done or env.is_success()["task"]
         done = int(done)
 
-        # compute TCP pixel data if we have camera info
-        if camera_info is not None and camera_names is not None:
-            # Try to extract TCP pose from observation
-            # Robosuite typically has keys like "robot0_eef_pos" and "robot0_eef_quat"
-            tcp_pose = None
-            for key in obs.keys():
-                if "eef_pos" in key:
-                    pos_key = key
-                    # Find corresponding quaternion key
-                    quat_key = key.replace("_pos", "_quat")
-                    if quat_key in obs:
-                        # Combine position and quaternion into TCP pose
-                        tcp_pose = np.concatenate([obs[pos_key], obs[quat_key]])
-                        break
-
-            # If we found TCP pose, compute pixel data for each camera
-            if tcp_pose is not None:
-                for cam_name in camera_names:
-                    if cam_name in camera_info:
-                        K = np.array(camera_info[cam_name]["intrinsics"])
-                        R = np.array(camera_info[cam_name]["extrinsics"])
-
-                        if "eye_in_hand" in cam_name:
-                            tcp_data = compute_tcp_pixel_data(
-                                h=camera_height,
-                                w=camera_width,
-                                tcp_pose=R,
-                                camera_extrinsics=np.eye(4),
-                                camera_intrinsics=K
-                            )
-                        else:
-                            tcp_data = compute_tcp_pixel_data(
-                                h=camera_height,
-                                w=camera_width,
-                                tcp_pose=tcp_pose,
-                                camera_extrinsics=np.linalg.inv(R),
-                                camera_intrinsics=K
-                            )
-
-                        if tcp_data is not None:
-                            # Add TCP data to observation with camera-specific keys
-                            for data_key, data_val in tcp_data.items():
-                                obs_key = f"{cam_name}_{data_key}"
-                                obs[obs_key] = data_val
-                                # Also add to next_obs
-                                # For next_obs, we need to compute with next_obs's TCP pose
-                                pass  # Will compute next_obs TCP data separately
-
-        # Also compute TCP pixel data for next_obs
-        if camera_info is not None and camera_names is not None:
-            tcp_pose_next = None
-            for key in next_obs.keys():
-                if "eef_pos" in key:
-                    pos_key = key
-                    quat_key = key.replace("_pos", "_quat")
-                    if quat_key in next_obs:
-                        tcp_pose_next = np.concatenate([next_obs[pos_key], next_obs[quat_key]])
-                        break
-
-            if tcp_pose_next is not None:
-                for cam_name in camera_names:
-                    if cam_name in camera_info:
-                        K = np.array(camera_info[cam_name]["intrinsics"])
-                        R = np.array(camera_info[cam_name]["extrinsics"])
-
-
-                        if "eye_in_hand" in cam_name:
-                            tcp_data_next = compute_tcp_pixel_data(
-                                h=camera_height,
-                                w=camera_width,
-                                tcp_pose=R,
-                                camera_extrinsics=np.eye(4),
-                                camera_intrinsics=K
-                            )
-                        else:
-                            tcp_data_next = compute_tcp_pixel_data(
-                                h=camera_height,
-                                w=camera_width,
-                                tcp_pose=tcp_pose_next,
-                                camera_extrinsics=np.linalg.inv(R),
-                                camera_intrinsics=K
-                            )
-
-                        if tcp_data_next is not None:
-                            for data_key, data_val in tcp_data_next.items():
-                                obs_key = f"{cam_name}_{data_key}"
-                                next_obs[obs_key] = data_val
+        # Compute TCP for next_obs AFTER advancing state so sim matches next_obs
+        _compute_tcp_for_obs(next_obs)
 
         # collect transition
         traj["obs"].append(obs)
@@ -523,8 +504,31 @@ def dataset_states_to_obs(args):
     if args.depth:
         assert len(args.camera_names) > 0, "must specify camera names if using depth"
 
+    # Check if multi-view is enabled and auto-enable depth for SAVLA compatibility
+    multi_view_config = create_config_from_args(args, args.camera_height, args.camera_width)
+    if multi_view_config is not None and not args.depth:
+        print("[INFO] Multi-view enabled: automatically enabling depth for SAVLA compatibility")
+        args.depth = True
+
     # create environment to use for data processing
     env_meta = FileUtils.get_env_metadata_from_dataset(dataset_path=args.dataset)
+    
+    # Handle robosuite 1.5+ controller configuration compatibility
+    # Old datasets have controller_configs in robosuite 1.4 format which won't work with 1.5+
+    if is_robosuite_v15_or_later():
+        if "controller_configs" in env_meta.get("env_kwargs", {}):
+            # Convert old controller config to new composite format
+            env_meta["env_kwargs"]["controller_configs"] = refactor_composite_controller_config(
+                env_meta["env_kwargs"]["controller_configs"],
+                robot_type="panda",
+                arms=["right"],
+            )
+        else:
+            # Use default composite controller config for robosuite 1.5+
+            from robosuite.controllers import load_composite_controller_config
+            controller_config = load_composite_controller_config(robot="Panda")
+            env_meta["env_kwargs"]["controller_configs"] = controller_config
+    
     env = EnvUtils.create_env_for_data_processing(
         env_meta=env_meta,
         camera_names=args.camera_names, 
@@ -535,12 +539,13 @@ def dataset_states_to_obs(args):
     )
 
     # Wrap with multi-view if enabled
-    multi_view_config = create_config_from_args(args, args.camera_height, args.camera_width)
     if multi_view_config is not None:
         env = MultiViewEnvWrapper(env, multi_view_config)
         # Update camera names to include all views
         args.camera_names = env.camera_names
         print(f"Multi-view enabled with cameras: {env.camera_names}")
+        # Print configuration summary with validation warnings
+        env.print_config_summary()
 
     print("==== Using environment with the following metadata ====")
     print(json.dumps(env.serialize(), indent=4))

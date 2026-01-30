@@ -28,6 +28,7 @@ from demo_aug.configs.multi_view_config import (
     MultiViewCameraConfig, 
     ThirdViewCameraConfig,
     EyeInHandCameraConfig,
+    WristCameraPerturbConfig,
 )
 from demo_aug.utils.camera_utils import (
     get_camera_intrinsic_matrix,
@@ -70,7 +71,8 @@ class MultiViewEnvWrapper:
         self.added_camera_names: List[str] = []
         self._sampled_params: Dict[str, Dict] = {}  # Store sampling parameters
         self._cameras_added = False
-        
+        self._modified_xml: Optional[str] = None  # Store XML with added cameras
+
         # Add cameras to the environment
         self._add_cameras_to_env()
     
@@ -213,6 +215,14 @@ class MultiViewEnvWrapper:
                 logger.info(f"Added wrist camera '{name}': azimuth={azimuth:.1f}°, "
                            f"elevation={elevation:.1f}°, distance={distance:.2f}m")
         
+        # ----- Apply perturbation to original wrist camera -----
+        if self.config.wrist_perturbation.enable and self.config.keep_wrist_camera:
+            xml = self._apply_wrist_perturbation(xml, rng)
+
+        # ----- Add perturbed wrist camera copies -----
+        if self.config.num_perturbed_wrist_views > 0:
+            xml = self._add_perturbed_wrist_cameras(xml, rng)
+
         # Reload environment with new XML
         self._reload_env_with_xml(xml, initial_state)
         self._cameras_added = True
@@ -302,6 +312,203 @@ class MultiViewEnvWrapper:
         
         return xml
     
+    def _apply_wrist_perturbation(
+        self, 
+        xml: str, 
+        rng: np.random.Generator
+    ) -> str:
+        """Apply random perturbation to the original robot0_eye_in_hand camera.
+        
+        This modifies the camera's position and orientation in the XML to simulate
+        real-world mounting variations.
+        
+        Args:
+            xml: MuJoCo XML string
+            rng: Random number generator for reproducibility
+            
+        Returns:
+            Modified XML string with perturbed wrist camera
+        """
+        import re
+        
+        cfg = self.config.wrist_perturbation
+        
+        # Sample perturbation values
+        pos_delta = np.array([
+            rng.uniform(*cfg.pos_x_range),
+            rng.uniform(*cfg.pos_y_range),
+            rng.uniform(*cfg.pos_z_range),
+        ])
+        
+        roll_delta = rng.uniform(*cfg.roll_range)
+        pitch_delta = rng.uniform(*cfg.pitch_range)
+        yaw_delta = rng.uniform(*cfg.yaw_range)
+        
+        # Store perturbation params for logging/debugging
+        self._sampled_params["robot0_eye_in_hand_perturbation"] = {
+            "pos_delta": pos_delta.tolist(),
+            "roll_delta": roll_delta,
+            "pitch_delta": pitch_delta,
+            "yaw_delta": yaw_delta,
+        }
+        
+        logger.info(
+            f"Applying wrist camera perturbation: "
+            f"pos_delta={pos_delta}, roll={roll_delta:.2f}°, "
+            f"pitch={pitch_delta:.2f}°, yaw={yaw_delta:.2f}°"
+        )
+        
+        # Find robot0_eye_in_hand camera in XML
+        # Pattern matches: <camera name="robot0_eye_in_hand" pos="..." quat="..." ... />
+        camera_pattern = r'(<camera[^>]*name="robot0_eye_in_hand"[^>]*)(/>)'
+        
+        match = re.search(camera_pattern, xml)
+        if not match:
+            logger.warning("Could not find robot0_eye_in_hand camera in XML, skipping perturbation")
+            return xml
+        
+        camera_tag = match.group(1)
+        
+        # Extract current pos attribute
+        pos_match = re.search(r'pos="([^"]+)"', camera_tag)
+        if pos_match:
+            current_pos = np.array([float(x) for x in pos_match.group(1).split()])
+            new_pos = current_pos + pos_delta
+            new_pos_str = f"{new_pos[0]:.6f} {new_pos[1]:.6f} {new_pos[2]:.6f}"
+            camera_tag = re.sub(r'pos="[^"]+"', f'pos="{new_pos_str}"', camera_tag)
+        
+        # Extract current quat attribute and apply rotation perturbation
+        quat_match = re.search(r'quat="([^"]+)"', camera_tag)
+        if quat_match:
+            # MuJoCo uses wxyz quaternion format
+            current_quat_wxyz = np.array([float(x) for x in quat_match.group(1).split()])
+            current_quat_xyzw = np.array([
+                current_quat_wxyz[1], current_quat_wxyz[2], 
+                current_quat_wxyz[3], current_quat_wxyz[0]
+            ])
+            
+            # Create perturbation rotation (Euler angles in degrees)
+            perturb_rot = Rotation.from_euler(
+                'xyz', 
+                [roll_delta, pitch_delta, yaw_delta], 
+                degrees=True
+            )
+            
+            # Apply perturbation: new_rot = perturb_rot * current_rot
+            current_rot = Rotation.from_quat(current_quat_xyzw)
+            new_rot = perturb_rot * current_rot
+            
+            # Convert back to wxyz for MuJoCo
+            new_quat_xyzw = new_rot.as_quat()
+            new_quat_wxyz = np.array([
+                new_quat_xyzw[3], new_quat_xyzw[0], 
+                new_quat_xyzw[1], new_quat_xyzw[2]
+            ])
+            new_quat_str = f"{new_quat_wxyz[0]:.6f} {new_quat_wxyz[1]:.6f} {new_quat_wxyz[2]:.6f} {new_quat_wxyz[3]:.6f}"
+            camera_tag = re.sub(r'quat="[^"]+"', f'quat="{new_quat_str}"', camera_tag)
+        
+        # Replace in XML
+        xml = re.sub(camera_pattern, camera_tag + r'\2', xml)
+
+        return xml
+
+    def _add_perturbed_wrist_cameras(self, xml: str, rng: np.random.Generator) -> str:
+        """Add N perturbed copies of robot0_eye_in_hand as separate cameras.
+
+        Each perturbed camera is an independent perturbation of the original wrist
+        camera, attached to the same parent body (robot0_right_hand). These are
+        intended to be paired 1:1 with third-person views for cross-view experiments.
+
+        Args:
+            xml: MuJoCo XML string
+            rng: Random number generator for reproducibility
+
+        Returns:
+            Modified XML string with added perturbed wrist cameras
+        """
+        import re
+
+        cfg = self.config.wrist_perturbation
+
+        # Extract original robot0_eye_in_hand pos/quat from XML
+        camera_pattern = r'<camera[^>]*name="robot0_eye_in_hand"[^>]*/>'
+        match = re.search(camera_pattern, xml)
+        if not match:
+            logger.warning("robot0_eye_in_hand not found, skipping perturbed wrist cameras")
+            return xml
+
+        camera_tag = match.group(0)
+        pos_match = re.search(r'pos="([^"]+)"', camera_tag)
+        quat_match = re.search(r'quat="([^"]+)"', camera_tag)
+
+        if not pos_match or not quat_match:
+            logger.warning("Cannot extract pos/quat from robot0_eye_in_hand")
+            return xml
+
+        original_pos = np.array([float(x) for x in pos_match.group(1).split()])
+        original_quat_wxyz = np.array([float(x) for x in quat_match.group(1).split()])
+
+        for i in range(self.config.num_perturbed_wrist_views):
+            name = f"robot0_eye_in_hand_perturbed_{i}"
+
+            # Sample perturbation (same logic as _apply_wrist_perturbation)
+            pos_delta = np.array([
+                rng.uniform(*cfg.pos_x_range),
+                rng.uniform(*cfg.pos_y_range),
+                rng.uniform(*cfg.pos_z_range),
+            ])
+            roll_delta = rng.uniform(*cfg.roll_range)
+            pitch_delta = rng.uniform(*cfg.pitch_range)
+            yaw_delta = rng.uniform(*cfg.yaw_range)
+
+            # Apply position perturbation
+            new_pos = original_pos + pos_delta
+
+            # Apply rotation perturbation
+            original_quat_xyzw = np.array([
+                original_quat_wxyz[1], original_quat_wxyz[2],
+                original_quat_wxyz[3], original_quat_wxyz[0],
+            ])
+            perturb_rot = Rotation.from_euler(
+                'xyz', [roll_delta, pitch_delta, yaw_delta], degrees=True
+            )
+            current_rot = Rotation.from_quat(original_quat_xyzw)
+            new_rot = perturb_rot * current_rot
+            new_quat_xyzw = new_rot.as_quat()
+            new_quat_wxyz = np.array([
+                new_quat_xyzw[3], new_quat_xyzw[0],
+                new_quat_xyzw[1], new_quat_xyzw[2],
+            ])
+
+            # Store params
+            self._sampled_params[name] = {
+                "pos_delta": pos_delta.tolist(),
+                "roll_delta": roll_delta,
+                "pitch_delta": pitch_delta,
+                "yaw_delta": yaw_delta,
+                "is_wrist": True,
+            }
+
+            # Add camera to XML
+            pos_str = f"{new_pos[0]} {new_pos[1]} {new_pos[2]}"
+            quat_str = f"{new_quat_wxyz[0]} {new_quat_wxyz[1]} {new_quat_wxyz[2]} {new_quat_wxyz[3]}"
+
+            xml = add_camera_to_xml(
+                xml=xml,
+                camera_name=name,
+                camera_pos=pos_str,
+                camera_quat=quat_str,
+                parent_body_name="robot0_right_hand",
+                is_eye_in_hand_camera=True,
+            )
+            self.added_camera_names.append(name)
+            logger.info(
+                f"Added perturbed wrist camera '{name}': "
+                f"pos_delta={pos_delta}, rot=({roll_delta:.1f}, {pitch_delta:.1f}, {yaw_delta:.1f})°"
+            )
+
+        return xml
+
     def _spherical_to_pos_quat(
         self,
         azimuth_deg: float,
@@ -422,6 +629,9 @@ class MultiViewEnvWrapper:
 
     def _reload_env_with_xml(self, xml: str, initial_state: np.ndarray):
         """Reload the environment with modified XML and restore state."""
+        # Save the modified XML for future resets
+        self._modified_xml = xml
+
         # Get the base env
         if hasattr(self.env, 'env') and hasattr(self.env.env, 'reset_from_xml_string'):
             base_env = self.env.env
@@ -430,13 +640,18 @@ class MultiViewEnvWrapper:
         else:
             raise RuntimeError("Cannot find reset_from_xml_string method on environment")
         
-        # Update camera lists with correct sizes for each camera type
+        # Reload simulation with new XML
+        # NOTE: This will reset camera_names, so we need to update them AFTER
+        base_env.reset_from_xml_string(xml)
+
+        # NOW update camera lists AFTER reload (to prevent them being overwritten)
         third_cfg = self.config.third_view_config
         wrist_cfg = self.config.wrist_view_config
-        
+
         for cam_name in self.added_camera_names:
-            base_env.camera_names.append(cam_name)
-            
+            if cam_name not in base_env.camera_names:
+                base_env.camera_names.append(cam_name)
+
             # Check if this is a wrist camera
             if cam_name in self._sampled_params and self._sampled_params[cam_name].get("is_wrist", False):
                 base_env.camera_heights.append(wrist_cfg.height)
@@ -444,13 +659,13 @@ class MultiViewEnvWrapper:
             else:
                 base_env.camera_heights.append(third_cfg.height)
                 base_env.camera_widths.append(third_cfg.width)
-            
+
             base_env.camera_depths.append(True)
-        
+
         base_env.num_cameras = len(base_env.camera_names)
-        
-        # Reload simulation with new XML
-        base_env.reset_from_xml_string(xml)
+
+        logger.info(f"Successfully updated camera configuration with {len(self.added_camera_names)} additional cameras")
+
         base_env.sim.reset()
         base_env.sim.set_state_from_flattened(initial_state)
         base_env.sim.forward()
@@ -632,7 +847,7 @@ class MultiViewEnvWrapper:
     def print_config_summary(self) -> None:
         """Print a summary of the camera configuration."""
         from demo_aug.configs.multi_view_config import print_config_summary
-        print_config_summary(self.config)
+        print_config_summary(self.config, preset_name=self.config.preset_name)
     
     # ========== Delegate methods to wrapped environment ==========
     
@@ -641,12 +856,70 @@ class MultiViewEnvWrapper:
         return self.env.reset(**kwargs)
     
     def reset_to(self, state, **kwargs):
-        """Reset to a specific state."""
-        return self.env.reset_to(state, **kwargs)
+        """Reset to a specific state, preserving added cameras."""
+        # If state contains "model" (XML), replace it with our modified XML
+        # to preserve the added cameras
+        if self._cameras_added and self._modified_xml is not None and isinstance(state, dict) and "model" in state:
+            # Create a copy of state with our modified XML
+            modified_state = state.copy()
+            modified_state["model"] = self._modified_xml
+            obs = self.env.reset_to(modified_state, **kwargs)
+        else:
+            obs = self.env.reset_to(state, **kwargs)
+
+        # Add observations from additional cameras
+        if self._cameras_added and self.added_camera_names and obs is not None:
+            obs = self._add_camera_observations(obs)
+
+        return obs
+
+    def _add_camera_observations(self, obs: dict) -> dict:
+        """Add observations from additional cameras to the observation dict."""
+        if not isinstance(obs, dict):
+            return obs
+
+        # Render each additional camera
+        for cam_name in self.added_camera_names:
+            # Get camera config
+            is_wrist = self._sampled_params.get(cam_name, {}).get("is_wrist", False)
+            if is_wrist:
+                cfg = self.config.wrist_view_config
+            else:
+                cfg = self.config.third_view_config
+
+            try:
+                # Render RGB and depth directly from robosuite sim
+                if hasattr(self.env, 'env'):
+                    base_env = self.env.env
+                else:
+                    base_env = self.env
+
+                # Render RGB and depth together for efficiency
+                rgb, depth = base_env.sim.render(
+                    camera_name=cam_name,
+                    height=cfg.height,
+                    width=cfg.width,
+                    depth=True,
+                )
+
+                # MuJoCo renders images upside down, so flip them
+                obs[f"{cam_name}_image"] = rgb[::-1]
+                obs[f"{cam_name}_depth"] = depth[::-1]
+
+            except Exception as e:
+                logger.warning(f"Failed to render camera {cam_name}: {e}")
+
+        return obs
     
     def step(self, action):
-        """Take a step in the environment."""
-        return self.env.step(action)
+        """Take a step in the environment, adding multi-view camera observations."""
+        obs, reward, done, info = self.env.step(action)
+
+        # Add observations from additional cameras
+        if self._cameras_added and self.added_camera_names:
+            obs = self._add_camera_observations(obs)
+
+        return obs, reward, done, info
     
     def render(self, **kwargs):
         """Render the environment."""

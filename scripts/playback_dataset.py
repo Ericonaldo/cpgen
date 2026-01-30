@@ -131,7 +131,7 @@ def playback_trajectory_with_env(
     recorded_actions = []
     rec_obs = defaultdict(list)
 
-    assert isinstance(env, EnvBase)
+    assert isinstance(env, (EnvBase, MultiViewEnvWrapper))
 
     write_video = video_writer is not None
     video_count = 0

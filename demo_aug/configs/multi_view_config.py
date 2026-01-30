@@ -25,12 +25,44 @@ from typing import Dict, List, Tuple, Optional
 # =============================================================================
 
 SAMPLING_PRESETS: Dict[str, Dict] = {
-    # Default: good balance between diversity and avoiding occlusions
-    "default": {
-        "azimuth_range": (-45.0, 45.0),      # Front-facing only (avoid robot back)
-        "elevation_range": (25.0, 55.0),     # Above table (avoid object occlusion)
+    # Conservative: frontal views only (existing "default" renamed)
+    "conservative": {
+        "azimuth_range": (-45.0, 45.0),      # Front-facing only
+        "elevation_range": (25.0, 55.0),     # Above table
         "distance_range": (1.0, 1.6),        # Similar to agentview
-        "target": (0.0, 0.0, 0.8),           # Table center
+        "target": (0.0, 0.0, 0.8),
+    },
+
+    # Wide: full front hemisphere
+    "wide": {
+        "azimuth_range": (-90.0, 90.0),      # Full frontal 180°
+        "elevation_range": (15.0, 70.0),     # Near-table to overhead
+        "distance_range": (0.8, 2.0),        # Wider distance range
+        "target": (0.0, 0.0, 0.8),
+    },
+
+    # Hemisphere: 3/4 sphere (includes some back-side views)
+    "hemisphere": {
+        "azimuth_range": (-135.0, 135.0),    # 270° coverage
+        "elevation_range": (10.0, 80.0),     # Near-table to top-down
+        "distance_range": (0.7, 2.2),        # Broad distance
+        "target": (0.0, 0.0, 0.8),
+    },
+
+    # Full sphere: complete 360° coverage (expect occlusions)
+    "full_sphere": {
+        "azimuth_range": (-180.0, 180.0),    # Full 360°
+        "elevation_range": (0.0, 85.0),      # Horizon to nearly vertical
+        "distance_range": (0.6, 2.5),        # Maximum range
+        "target": (0.0, 0.0, 0.8),
+    },
+
+    # Default: alias for conservative (backward compatibility)
+    "default": {
+        "azimuth_range": (-45.0, 45.0),
+        "elevation_range": (25.0, 55.0),
+        "distance_range": (1.0, 1.6),
+        "target": (0.0, 0.0, 0.8),
     },
 }
 
@@ -192,6 +224,38 @@ class EyeInHandCameraConfig:
     is_random: bool = True
 
 
+@dataclass
+class WristCameraPerturbConfig:
+    """Configuration for perturbing the original wrist camera (robot0_eye_in_hand).
+    
+    This simulates real-world variations in camera mounting on the robot's end-effector.
+    Unlike EyeInHandCameraConfig which adds NEW cameras, this config modifies the 
+    ORIGINAL robot0_eye_in_hand camera's position and orientation.
+    
+    The coordinate system is relative to the gripper:
+    - X: forward (pointing toward workspace)
+    - Y: left/right 
+    - Z: up/down
+    
+    Constraints are designed to ensure gripper remains visible:
+    - Forward (positive X) perturbation is safer than backward
+    - Lateral and vertical perturbations should be small
+    - Rotation perturbations should be minimal to avoid losing gripper from view
+    """
+    
+    enable: bool = False
+    
+    # Per-axis position perturbation ranges (meters)
+    # Asymmetric X range: backward less (-1cm), forward more (+2cm)
+    pos_x_range: Tuple[float, float] = (-0.01, 0.02)
+    pos_y_range: Tuple[float, float] = (-0.015, 0.015)  # ±1.5cm left/right
+    pos_z_range: Tuple[float, float] = (-0.01, 0.01)    # ±1cm up/down
+    
+    # Conservative orientation perturbation ranges (degrees)
+    roll_range: Tuple[float, float] = (-3.0, 3.0)    # minimal tilt left/right
+    pitch_range: Tuple[float, float] = (-5.0, 5.0)   # moderate tilt up/down
+    yaw_range: Tuple[float, float] = (-3.0, 3.0)     # minimal rotation in-plane
+
 
 @dataclass
 class MultiViewCameraConfig:
@@ -233,6 +297,10 @@ class MultiViewCameraConfig:
     
     # Number of additional wrist-mounted views to generate
     num_wrist_views: int = 0
+
+    # Number of perturbed copies of wrist camera to add
+    # Each is an independent perturbation of robot0_eye_in_hand, paired 1:1 with third_views
+    num_perturbed_wrist_views: int = 0
     
     # Enable zone-based sampling for better view diversity
     # When True, cameras are distributed across SAMPLING_ZONES (front, front_left, front_right, overhead)
@@ -260,7 +328,15 @@ class MultiViewCameraConfig:
     
     # Seed for reproducibility (None = random each time)
     seed: Optional[int] = None
-    
+
+    # Wrist camera perturbation config (modifies original robot0_eye_in_hand)
+    wrist_perturbation: WristCameraPerturbConfig = field(
+        default_factory=WristCameraPerturbConfig
+    )
+
+    # Preset name (for logging/debugging)
+    preset_name: Optional[str] = None
+
     def get_all_camera_names(self) -> List[str]:
         """Get list of all camera names that will be used.
         
@@ -276,6 +352,8 @@ class MultiViewCameraConfig:
             names.append(f"{self.third_view_config.name}_{i}")
         for i in range(self.num_wrist_views):
             names.append(f"{self.wrist_view_config.name}_{i}")
+        for i in range(self.num_perturbed_wrist_views):
+            names.append(f"robot0_eye_in_hand_perturbed_{i}")
         return names
     
 
@@ -314,24 +392,45 @@ class MultiViewCameraConfig:
 # Convenience Functions
 # =============================================================================
 
-def validate_camera_ranges(config: ThirdViewCameraConfig) -> List[str]:
+def validate_camera_ranges(config: ThirdViewCameraConfig, preset_name: str = None) -> List[str]:
     """Validate camera sampling ranges and return warnings.
-    
+
     Args:
         config: Camera configuration to validate
-        
+        preset_name: Name of preset being used (for context-specific warnings)
+
     Returns:
         List of warning messages (empty if all OK)
     """
     warnings = []
-    
+
+    # Preset-specific context warnings
+    if preset_name == "full_sphere":
+        warnings.append(
+            "[INFO] Preset 'full_sphere': 360° coverage with EXPECTED robot body occlusions "
+            "from back views. Use for testing view-invariance."
+        )
+    elif preset_name == "hemisphere":
+        warnings.append(
+            "[INFO] Preset 'hemisphere': 270° coverage with POSSIBLE partial occlusions "
+            "from side/back-side views. Preview recommended."
+        )
+    elif preset_name == "wide":
+        warnings.append(
+            "[INFO] Preset 'wide': 180° frontal hemisphere with minimal occlusion risk."
+        )
+    elif preset_name == "conservative":
+        warnings.append(
+            "[INFO] Preset 'conservative': Frontal views only (safest, like agentview)."
+        )
+
     # Check azimuth (staying frontal)
     if config.azimuth_range[0] < -90 or config.azimuth_range[1] > 90:
         warnings.append(
             f"[WARNING] Azimuth range {config.azimuth_range} extends beyond +/-90 deg. "
             "This may cause robot body to occlude the workspace."
         )
-    
+
     # Check elevation (staying above table)
     if config.elevation_range[0] < 15:
         warnings.append(
@@ -343,7 +442,7 @@ def validate_camera_ranges(config: ThirdViewCameraConfig) -> List[str]:
             f"[WARNING] Maximum elevation {config.elevation_range[1]} deg is very high. "
             "Top-down views may make depth perception difficult."
         )
-    
+
     # Check distance (not too close/far)
     if config.distance_range[0] < 0.6:
         warnings.append(
@@ -355,17 +454,19 @@ def validate_camera_ranges(config: ThirdViewCameraConfig) -> List[str]:
             f"[WARNING] Maximum distance {config.distance_range[1]}m is quite far. "
             "Objects may appear very small in the image."
         )
-    
+
     return warnings
 
 
-def print_config_summary(config: MultiViewCameraConfig) -> None:
+def print_config_summary(config: MultiViewCameraConfig, preset_name: str = None) -> None:
     """Print a human-readable summary of the configuration."""
     cfg = config.third_view_config
-    
+
     print("=" * 60)
     print("Multi-View Camera Configuration Summary")
     print("=" * 60)
+    if preset_name:
+        print(f"Preset: {preset_name}")
     print(f"Total cameras: {len(config.get_all_camera_names())}")
     print(f"  - Original agentview: {'Yes' if config.keep_original_agentview else 'No'}")
     print(f"  - Wrist camera: {'Yes' if config.keep_wrist_camera else 'No'}")
@@ -380,18 +481,15 @@ def print_config_summary(config: MultiViewCameraConfig) -> None:
     print(f"Image size: {cfg.width}x{cfg.height}, FOV: {cfg.fov}°")
     print(f"Random sampling: {cfg.is_random}, Min separation: {config.min_angular_separation}°")
     print(f"Seed: {config.seed or 'None (random)'}")
-    
+
     # Validate and print warnings
-    warnings = validate_camera_ranges(cfg)
+    warnings = validate_camera_ranges(cfg, preset_name=preset_name)
     if warnings:
         print()
-        print("Warnings:")
+        print("Configuration Info:")
         for w in warnings:
             print(f"  {w}")
-    else:
-        print()
-        print("[OK] Configuration looks good for avoiding occlusions")
-    
+
     print("=" * 60)
 
 
@@ -401,25 +499,44 @@ def print_config_summary(config: MultiViewCameraConfig) -> None:
 
 def add_multi_view_args(parser: argparse.ArgumentParser) -> None:
     """Add multi-view camera arguments to an argument parser.
-    
+
     This centralizes all multi-view CLI argument definitions to avoid
     duplication across scripts.
-    
+
     Args:
         parser: ArgumentParser to add arguments to
     """
     group = parser.add_argument_group('Multi-view camera options')
+
     group.add_argument(
         "--enable_multi_view",
         action="store_true",
         help="Enable multi-view data collection with additional cameras",
     )
+
+    # NEW: Add preset selection
+    group.add_argument(
+        "--multi_view_preset",
+        type=str,
+        choices=["conservative", "wide", "hemisphere", "full_sphere", "default"],
+        default="conservative",
+        help=(
+            "Sampling preset for camera views: "
+            "'conservative' (frontal, -45° to 45°, safest), "
+            "'wide' (front hemisphere, -90° to 90°), "
+            "'hemisphere' (270° coverage, -135° to 135°), "
+            "'full_sphere' (360° coverage, expect occlusions)"
+        ),
+    )
+
     group.add_argument(
         "--num_third_views",
         type=int,
         default=4,
         help="Number of additional third-person view cameras (default: 4)",
     )
+
+    # Keep existing arguments for manual overrides
     group.add_argument(
         "--multi_view_seed",
         type=int,
@@ -437,22 +554,22 @@ def add_multi_view_args(parser: argparse.ArgumentParser) -> None:
         "--multi_view_azimuth_range",
         type=float,
         nargs=2,
-        default=[-45.0, 45.0],
-        help="Azimuth angle range in degrees (min, max)",
+        default=None,  # Will use preset if not specified
+        help="Azimuth angle range in degrees (min, max) - overrides preset",
     )
     group.add_argument(
         "--multi_view_elevation_range",
         type=float,
         nargs=2,
-        default=[25.0, 55.0],
-        help="Elevation angle range in degrees (min, max)",
+        default=None,  # Will use preset if not specified
+        help="Elevation angle range in degrees (min, max) - overrides preset",
     )
     group.add_argument(
         "--multi_view_distance_range",
         type=float,
         nargs=2,
-        default=[1.0, 1.6],
-        help="Distance range from target in meters (min, max)",
+        default=None,  # Will use preset if not specified
+        help="Distance range from target in meters (min, max) - overrides preset",
     )
     group.add_argument(
         "--multi_view_min_separation",
@@ -472,6 +589,31 @@ def add_multi_view_args(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="(optional) Path to save camera preview image for human validation",
     )
+    
+    # Wrist camera perturbation options
+    group.add_argument(
+        "--perturb_wrist_camera",
+        action="store_true",
+        help="Apply random perturbation to wrist camera (robot0_eye_in_hand) to simulate mounting variations",
+    )
+    group.add_argument(
+        "--wrist_pos_range",
+        type=float,
+        default=0.02,
+        help="Position perturbation range for wrist camera in meters (default: 0.02 = ±2cm)",
+    )
+    group.add_argument(
+        "--wrist_rot_range",
+        type=float,
+        default=5.0,
+        help="Rotation perturbation range for wrist camera in degrees (default: 5.0 = ±5°)",
+    )
+    group.add_argument(
+        "--num_perturbed_wrist_views",
+        type=int,
+        default=0,
+        help="Number of perturbed copies of wrist camera to add (paired with third_views for cross-view experiments)",
+    )
 
 
 def create_config_from_args(
@@ -480,35 +622,85 @@ def create_config_from_args(
     image_width: Optional[int] = None,
 ) -> Optional[MultiViewCameraConfig]:
     """Create MultiViewCameraConfig from parsed command-line arguments.
-    
+
     Args:
         args: Parsed argparse namespace with multi-view arguments
         image_height: Override image height (uses args.multi_view_image_size if None)
         image_width: Override image width (uses args.multi_view_image_size if None)
-        
+
     Returns:
         MultiViewCameraConfig if multi-view enabled, None otherwise
     """
     if not getattr(args, 'enable_multi_view', False):
         return None
-    
+
     # Use provided sizes or fall back to multi_view_image_size
     height = image_height or getattr(args, 'multi_view_image_size', 256)
     width = image_width or getattr(args, 'multi_view_image_size', 256)
+
+    # Get preset name (default to 'conservative')
+    preset_name = getattr(args, 'multi_view_preset', 'conservative')
+
+    # Start with preset values
+    if preset_name in SAMPLING_PRESETS:
+        preset = SAMPLING_PRESETS[preset_name].copy()
+    else:
+        # Fallback to conservative if preset not found
+        preset = SAMPLING_PRESETS['conservative'].copy()
+
+    # Allow manual overrides
+    if getattr(args, 'multi_view_azimuth_range', None) is not None:
+        preset['azimuth_range'] = tuple(args.multi_view_azimuth_range)
+    if getattr(args, 'multi_view_elevation_range', None) is not None:
+        preset['elevation_range'] = tuple(args.multi_view_elevation_range)
+    if getattr(args, 'multi_view_distance_range', None) is not None:
+        preset['distance_range'] = tuple(args.multi_view_distance_range)
+    if getattr(args, 'multi_view_target', None) is not None:
+        preset['target'] = tuple(args.multi_view_target)
+
+    # Create third view config from preset
+    third_view_config = ThirdViewCameraConfig(
+        azimuth_range=preset['azimuth_range'],
+        elevation_range=preset['elevation_range'],
+        distance_range=preset['distance_range'],
+        target=preset['target'],
+        width=width,
+        height=height,
+    )
+
+    # Create wrist perturbation config
+    # Map scalar CLI arg 'wrist_pos_range' to per-axis ranges
+    # X axis: biased to forward (positive) to avoid self-occlusion
+    pos_range = getattr(args, 'wrist_pos_range', 0.02)
+    rot_range = getattr(args, 'wrist_rot_range', 5.0)
     
+    wrist_perturbation = WristCameraPerturbConfig(
+        enable=getattr(args, 'perturb_wrist_camera', False),
+        pos_x_range=(-pos_range * 0.5, pos_range),    # Back less, forward more
+        pos_y_range=(-pos_range * 0.75, pos_range * 0.75), # Slightly constrained Y
+        pos_z_range=(-pos_range * 0.5, pos_range * 0.5),   # Constrained Z
+        roll_range=(-rot_range, rot_range),
+        pitch_range=(-rot_range, rot_range),
+        yaw_range=(-rot_range, rot_range),
+    )
+
+    # Auto-set num_perturbed_wrist_views if generating pairs
+    # This enables _add_perturbed_wrist_cameras in the wrapper
+    num_perturbed = getattr(args, 'num_perturbed_wrist_views', 0)
+    if args.num_third_views > 0 and wrist_perturbation.enable:
+        # Default to matching pair count
+        if num_perturbed == 0:
+            num_perturbed = args.num_third_views
+
     return MultiViewCameraConfig(
         num_third_views=args.num_third_views,
+        num_perturbed_wrist_views=num_perturbed,
         keep_original_agentview=True,
         keep_wrist_camera=True,
-        third_view_config=ThirdViewCameraConfig(
-            target=tuple(args.multi_view_target),
-            azimuth_range=tuple(args.multi_view_azimuth_range),
-            elevation_range=tuple(args.multi_view_elevation_range),
-            distance_range=tuple(args.multi_view_distance_range),
-            width=width,
-            height=height,
-        ),
+        third_view_config=third_view_config,
         min_angular_separation=args.multi_view_min_separation,
         seed=args.multi_view_seed,
+        wrist_perturbation=wrist_perturbation,
+        preset_name=preset_name,
     )
 

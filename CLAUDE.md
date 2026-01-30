@@ -29,6 +29,143 @@ MUJOCO_GL=egl python demo_aug/generate.py --cfg.demo-path <path/to/hdf5> --cfg.e
 python scripts/playback_dataset.py --dataset <path/to/hdf5> --use-actions --video_path playback_dataset.mp4 --n 1
 ```
 
+## Multi-View Random Camera Generation
+
+CPGen supports generating demonstrations with diverse random camera viewpoints for training view-invariant policies.
+
+### Presets
+
+Four sampling presets control camera view diversity:
+
+| Preset | Azimuth Range | Elevation Range | Use Case |
+|--------|---------------|-----------------|----------|
+| `conservative` | -45° to 45° | 25° to 55° | Frontal views only (safest, like agentview) |
+| `wide` | -90° to 90° | 15° to 70° | Full front hemisphere, minimal occlusion risk |
+| `hemisphere` | -135° to 135° | 10° to 80° | 270° coverage, some side/back views, moderate occlusion |
+| `full_sphere` | -180° to 180° | 0° to 85° | Full 360° coverage, expect back-view occlusions |
+
+**Recommendation**: Start with `wide` for good diversity without occlusions.
+
+### Workflow (Post-Processing)
+
+**Step 1: Generate demonstrations with states (no rendering)**
+
+```bash
+MUJOCO_GL=egl python demo_aug/generate.py \
+    --cfg.demo-path datasets/source/coffee.hdf5 \
+    --cfg.env-name Coffee
+# Output: datasets/generated/coffee_TIMESTAMP/coffee.hdf5 (states only)
+```
+
+**Step 2: Render observations with random camera views**
+
+```bash
+# Example 1: Wide frontal views (recommended for training)
+python scripts/dataset_states_to_obs.py \
+    --dataset datasets/generated/coffee_TIMESTAMP/coffee.hdf5 \
+    --enable_multi_view \
+    --multi_view_preset wide \
+    --num_third_views 6 \
+    --multi_view_seed 42 \
+    --camera_names agentview robot0_eye_in_hand
+
+# Example 2: Hemisphere views (test generalization)
+python scripts/dataset_states_to_obs.py \
+    --dataset datasets/generated/coffee_TIMESTAMP/coffee.hdf5 \
+    --enable_multi_view \
+    --multi_view_preset hemisphere \
+    --num_third_views 8 \
+    --multi_view_seed 123
+
+# Example 3: Manual range override
+python scripts/dataset_states_to_obs.py \
+    --dataset datasets/generated/coffee_TIMESTAMP/coffee.hdf5 \
+    --enable_multi_view \
+    --multi_view_preset conservative \
+    --multi_view_azimuth_range -60 60 \
+    --num_third_views 4
+```
+
+**Step 3 (Optional): Generate preview for validation**
+
+```bash
+python scripts/playback_dataset.py \
+    --dataset datasets/generated/coffee_TIMESTAMP/coffee.hdf5 \
+    --enable_multi_view \
+    --multi_view_preset wide \
+    --num_third_views 6 \
+    --multi_view_seed 42 \
+    --multi_view_preview_path preview_cameras.png \
+    --video_path preview.mp4 \
+    --n 1
+# Check preview_cameras.png to validate camera quality before full rendering
+```
+
+### HDF5 Output Structure
+
+One HDF5 file contains ALL camera views:
+
+```
+dataset.hdf5
+├── demo_0/
+│   ├── obs/
+│   │   ├── agentview_image              # Original camera
+│   │   ├── agentview_depth
+│   │   ├── agentview_intrinsics
+│   │   ├── agentview_extrinsics
+│   │   ├── third_view_0_image           # Random view 1
+│   │   ├── third_view_0_depth
+│   │   ├── third_view_0_intrinsics
+│   │   ├── third_view_0_extrinsics
+│   │   ├── third_view_1_image           # Random view 2
+│   │   ├── third_view_1_depth
+│   │   ├── third_view_1_intrinsics
+│   │   ├── third_view_1_extrinsics
+│   │   └── ...
+```
+
+### SpatialAlignVLA Integration
+
+Load different camera views from the same HDF5 file:
+
+```python
+from savla.dataset.robomimic_hdf5 import RobomimicHDF5Dataset
+from torch.utils.data import ConcatDataset
+
+# Load multiple camera views
+train_datasets = [
+    RobomimicHDF5Dataset(
+        hdf5_path="cpgen_dataset.hdf5",
+        camera_name='agentview',
+        use_depth=True,
+    ),
+    RobomimicHDF5Dataset(
+        hdf5_path="cpgen_dataset.hdf5",
+        camera_name='third_view_0',
+        use_depth=True,
+    ),
+    RobomimicHDF5Dataset(
+        hdf5_path="cpgen_dataset.hdf5",
+        camera_name='third_view_1',
+        use_depth=True,
+    ),
+]
+combined = ConcatDataset(train_datasets)
+```
+
+### Troubleshooting
+
+**Issue: Severe occlusions in generated views**
+- Use `--multi_view_preview_path` to check camera quality first
+- Try a more conservative preset (e.g., switch from `hemisphere` to `wide`)
+- Increase `--multi_view_min_separation` for more diverse angles
+- Use different random seeds to resample bad configurations
+
+**Issue: All views look similar**
+- Increase `--num_third_views` for more cameras
+- Use a more diverse preset (e.g., `hemisphere` instead of `conservative`)
+- Check that `--multi_view_seed` is not reused across different datasets
+
 ## Architecture
 
 ### Main Entry Point
