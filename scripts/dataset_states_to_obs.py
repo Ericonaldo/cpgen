@@ -344,6 +344,9 @@ def extract_trajectory(
             if "eye_in_hand" in cam_name:
                 eye_in_hand_cameras.add(cam_name)
 
+    # Track per-camera TCP miss counts for this trajectory
+    tcp_miss_counts = {cam_name: 0 for cam_name in (camera_names or [])}
+
     def _compute_tcp_for_obs(observation):
         """Compute TCP pixel data for an observation using current sim state.
 
@@ -391,6 +394,8 @@ def extract_trajectory(
             if tcp_data is not None:
                 for data_key, data_val in tcp_data.items():
                     observation[f"{cam_name}_{data_key}"] = data_val
+            else:
+                tcp_miss_counts[cam_name] += 1
 
     # iteration variable @t is over "next obs" indices
     for t in range(1, traj_len + 1):
@@ -447,7 +452,7 @@ def extract_trajectory(
         else:
             traj[k] = np.array(traj[k])
 
-    return traj, camera_info
+    return traj, camera_info, tcp_miss_counts
 
 
 def get_camera_info(
@@ -595,17 +600,28 @@ def dataset_states_to_obs(args):
             actions_abs = f["data/{}/actions_abs".format(ep)][()]
         else:
             actions_abs = None
-        traj, camera_info = extract_trajectory(
-            env=env, 
-            initial_state=initial_state, 
-            states=states, 
+        traj, camera_info, tcp_miss_counts = extract_trajectory(
+            env=env,
+            initial_state=initial_state,
+            states=states,
             actions=actions,
             actions_abs=actions_abs,
             done_mode=args.done_mode,
-            camera_names=args.camera_names, 
-            camera_height=args.camera_height, 
+            camera_names=args.camera_names,
+            camera_height=args.camera_height,
             camera_width=args.camera_width,
         )
+
+        # TCP coverage check: warn about missing TCP frames per camera
+        if tcp_miss_counts:
+            for cam_name, miss_count in tcp_miss_counts.items():
+                if miss_count > 0:
+                    print(f"[WARNING] {ep}: camera '{cam_name}' has {miss_count} frames with TCP out of frame")
+                    if getattr(args, 'require_tcp', False):
+                        raise RuntimeError(
+                            f"--require-tcp: camera '{cam_name}' lost TCP in {miss_count} "
+                            f"frame(s) during {ep}. Reduce camera perturbation or fix camera placement."
+                        )
 
         # maybe copy reward or done signal from source file
         if args.copy_rewards:
@@ -771,6 +787,15 @@ if __name__ == "__main__":
 
     # Multi-view camera options (centralized in multi_view_config.py)
     add_multi_view_args(parser)
+
+    # TCP coverage enforcement
+    parser.add_argument(
+        "--require-tcp",
+        action="store_true",
+        dest="require_tcp",
+        help="Raise an error if any frame is missing TCP for any camera. "
+             "Useful for catching out-of-frame TCP during data generation.",
+    )
 
     args = parser.parse_args()
     dataset_states_to_obs(args)

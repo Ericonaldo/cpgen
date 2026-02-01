@@ -246,15 +246,17 @@ class WristCameraPerturbConfig:
     enable: bool = False
     
     # Per-axis position perturbation ranges (meters)
-    # Asymmetric X range: backward less (-1cm), forward more (+2cm)
-    pos_x_range: Tuple[float, float] = (-0.01, 0.02)
-    pos_y_range: Tuple[float, float] = (-0.015, 0.015)  # ±1.5cm left/right
-    pos_z_range: Tuple[float, float] = (-0.01, 0.01)    # ±1cm up/down
-    
+    # Reduced ranges to guarantee TCP stays in-frame for wrist camera.
+    # TCP projects ~43px (2.5cm) from bottom edge on 256×256; worst-case
+    # combined shift must stay ≤40% of that margin (~1.0cm).
+    pos_x_range: Tuple[float, float] = (-0.005, 0.01)   # depth axis, safe
+    pos_y_range: Tuple[float, float] = (-0.01, 0.01)    # ±1cm left/right
+    pos_z_range: Tuple[float, float] = (-0.005, 0.005)  # ±0.5cm up/down
+
     # Conservative orientation perturbation ranges (degrees)
-    roll_range: Tuple[float, float] = (-3.0, 3.0)    # minimal tilt left/right
-    pitch_range: Tuple[float, float] = (-5.0, 5.0)   # moderate tilt up/down
-    yaw_range: Tuple[float, float] = (-3.0, 3.0)     # minimal rotation in-plane
+    roll_range: Tuple[float, float] = (-2.0, 2.0)    # minimal tilt left/right
+    pitch_range: Tuple[float, float] = (-3.0, 3.0)   # moderate tilt up/down
+    yaw_range: Tuple[float, float] = (-2.0, 2.0)     # minimal rotation in-plane
 
 
 @dataclass
