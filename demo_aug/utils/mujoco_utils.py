@@ -1680,6 +1680,7 @@ def add_camera_to_xml(
         new_camera.set("name", camera_name)
         new_camera.set("pos", camera_pos)
         new_camera.set("quat", camera_quat)
+        new_camera.set("fovy", fovy)
 
     # Return the modified XML
     return ET.tostring(tree, encoding="utf8").decode("utf8")

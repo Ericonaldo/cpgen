@@ -119,9 +119,10 @@ class MultiViewEnvWrapper:
                         elevation = (cfg.elevation_range[0] + cfg.elevation_range[1]) / 2
                         distance = (cfg.distance_range[0] + cfg.distance_range[1]) / 2
                     
-                    # Check angular separation
+                    # Check angular separation (circular distance for wraparound)
                     is_valid = all(
-                        abs(azimuth - prev_az) >= self.config.min_angular_separation
+                        min(abs(azimuth - prev_az), 360 - abs(azimuth - prev_az))
+                        >= self.config.min_angular_separation
                         for prev_az in sampled_azimuths
                     )
                     
@@ -440,6 +441,7 @@ class MultiViewEnvWrapper:
         camera_tag = match.group(0)
         pos_match = re.search(r'pos="([^"]+)"', camera_tag)
         quat_match = re.search(r'quat="([^"]+)"', camera_tag)
+        fovy_match = re.search(r'fovy="([^"]+)"', camera_tag)
 
         if not pos_match or not quat_match:
             logger.warning("Cannot extract pos/quat from robot0_eye_in_hand")
@@ -447,6 +449,12 @@ class MultiViewEnvWrapper:
 
         original_pos = np.array([float(x) for x in pos_match.group(1).split()])
         original_quat_wxyz = np.array([float(x) for x in quat_match.group(1).split()])
+        original_fovy = None
+        if fovy_match:
+            original_fovy = fovy_match.group(1)
+        else:
+            # Fallback to configured wrist FOV if the original camera has no explicit fovy.
+            original_fovy = str(self.config.wrist_view_config.fov)
 
         for i in range(self.config.num_perturbed_wrist_views):
             name = f"robot0_eye_in_hand_perturbed_{i}"
@@ -500,6 +508,7 @@ class MultiViewEnvWrapper:
                 camera_quat=quat_str,
                 parent_body_name="robot0_right_hand",
                 is_eye_in_hand_camera=True,
+                fovy=original_fovy,
             )
             self.added_camera_names.append(name)
             logger.info(
