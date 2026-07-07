@@ -151,10 +151,14 @@ class ThirdViewCameraConfig:
     # Camera intrinsics (fixed for consistency)
     width: int = 256
     height: int = 256
-    fov: float = 60.0  # degrees
-    
+    fov: float = 45.0  # degrees (unified with agentview default)
+
     # Sampling behavior
     is_random: bool = True  # If False, use fixed evenly-spaced poses within ranges
+
+    # Fixed camera positions (overrides random/evenly-spaced sampling when set)
+    # List of (azimuth, elevation, distance) tuples. Length must match num_third_views.
+    fixed_positions: Optional[List[Tuple[float, float, float]]] = None
     
     @classmethod
     def from_preset(cls, preset_name: str, **overrides) -> "ThirdViewCameraConfig":
@@ -482,7 +486,7 @@ def print_config_summary(config: MultiViewCameraConfig, preset_name: str = None)
     print()
     print(f"Image size: {cfg.width}x{cfg.height}, FOV: {cfg.fov}°")
     print(f"Random sampling: {cfg.is_random}, Min separation: {config.min_angular_separation}°")
-    print(f"Seed: {config.seed or 'None (random)'}")
+    print(f"Seed: {config.seed if config.seed is not None else 'None (random)'}")
 
     # Validate and print warnings
     warnings = validate_camera_ranges(cfg, preset_name=preset_name)
@@ -574,6 +578,18 @@ def add_multi_view_args(parser: argparse.ArgumentParser) -> None:
         help="Distance range from target in meters (min, max) - overrides preset",
     )
     group.add_argument(
+        "--multi_view_fixed_positions",
+        type=str,
+        default=None,
+        help="Fixed camera positions as 'az1,el1,dist1;az2,el2,dist2;...' e.g. '60,40,1.0;120,40,1.0;-120,40,1.0'",
+    )
+    group.add_argument(
+        "--multi_view_fov",
+        type=float,
+        default=None,
+        help="FOV for third-view cameras in degrees (default: 45.0)",
+    )
+    group.add_argument(
         "--multi_view_min_separation",
         type=float,
         default=20.0,
@@ -660,6 +676,20 @@ def create_config_from_args(
     if getattr(args, 'multi_view_target', None) is not None:
         preset['target'] = tuple(args.multi_view_target)
 
+    # Parse fixed camera positions if provided
+    fixed_positions = None
+    raw_fp = getattr(args, 'multi_view_fixed_positions', None)
+    if raw_fp is not None:
+        fixed_positions = []
+        for entry in raw_fp.split(';'):
+            parts = [float(x) for x in entry.strip().split(',')]
+            if len(parts) != 3:
+                raise ValueError(f"Each fixed position must be 'az,el,dist'; got '{entry}'")
+            fixed_positions.append(tuple(parts))
+
+    # Override FOV if specified
+    fov = getattr(args, 'multi_view_fov', None) or 45.0
+
     # Create third view config from preset
     third_view_config = ThirdViewCameraConfig(
         azimuth_range=preset['azimuth_range'],
@@ -668,6 +698,8 @@ def create_config_from_args(
         target=preset['target'],
         width=width,
         height=height,
+        fov=fov,
+        fixed_positions=fixed_positions,
     )
 
     # Create wrist perturbation config
@@ -694,15 +726,21 @@ def create_config_from_args(
         if num_perturbed == 0:
             num_perturbed = args.num_third_views
 
+    # Create wrist view config with matching resolution
+    wrist_view_config = EyeInHandCameraConfig(
+        width=width,
+        height=height,
+    )
+
     return MultiViewCameraConfig(
         num_third_views=args.num_third_views,
         num_perturbed_wrist_views=num_perturbed,
         keep_original_agentview=True,
         keep_wrist_camera=True,
         third_view_config=third_view_config,
+        wrist_view_config=wrist_view_config,
         min_angular_separation=args.multi_view_min_separation,
         seed=args.multi_view_seed,
         wrist_perturbation=wrist_perturbation,
         preset_name=preset_name,
     )
-

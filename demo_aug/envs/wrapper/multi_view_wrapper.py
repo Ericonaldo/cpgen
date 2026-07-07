@@ -72,6 +72,8 @@ class MultiViewEnvWrapper:
         self._sampled_params: Dict[str, Dict] = {}  # Store sampling parameters
         self._cameras_added = False
         self._modified_xml: Optional[str] = None  # Store XML with added cameras
+        self._original_xml: Optional[str] = None  # Store XML before any camera additions
+        self._original_state: Optional[np.ndarray] = None  # Store initial sim state
 
         # Add cameras to the environment
         self._add_cameras_to_env()
@@ -84,14 +86,19 @@ class MultiViewEnvWrapper:
         
         rng = np.random.default_rng(self.config.seed)
         cfg = self.config.third_view_config
-        
+
         # Get the current simulation state and XML
         sim = self._get_sim()
         if sim is None:
             raise RuntimeError("Cannot access MuJoCo simulation object")
-        
+
         initial_state = sim.get_state().flatten()
         xml = sim.model.get_xml()
+
+        # Store original XML and state for resampling
+        if self._original_xml is None:
+            self._original_xml = xml
+            self._original_state = initial_state.copy()
         
         # Sample camera poses and add to XML
         sampled_azimuths = []
@@ -105,10 +112,13 @@ class MultiViewEnvWrapper:
             # Default: sample all cameras from third_view_config ranges
             for i in range(self.config.num_third_views):
                 name = f"{cfg.name}_{i}"
-                
+
                 # Try to sample a camera pose with minimum angular separation
                 for attempt in range(max_attempts):
-                    if cfg.is_random:
+                    if cfg.fixed_positions is not None and i < len(cfg.fixed_positions):
+                        # Use explicitly specified fixed positions
+                        azimuth, elevation, distance = cfg.fixed_positions[i]
+                    elif cfg.is_random:
                         azimuth = rng.uniform(*cfg.azimuth_range)
                         elevation = rng.uniform(*cfg.elevation_range)
                         distance = rng.uniform(*cfg.distance_range)
@@ -118,15 +128,15 @@ class MultiViewEnvWrapper:
                         azimuth = cfg.azimuth_range[0] + (i + 0.5) * azimuth_span / self.config.num_third_views
                         elevation = (cfg.elevation_range[0] + cfg.elevation_range[1]) / 2
                         distance = (cfg.distance_range[0] + cfg.distance_range[1]) / 2
-                    
+
                     # Check angular separation (circular distance for wraparound)
                     is_valid = all(
                         min(abs(azimuth - prev_az), 360 - abs(azimuth - prev_az))
                         >= self.config.min_angular_separation
                         for prev_az in sampled_azimuths
                     )
-                    
-                    if is_valid or not cfg.is_random:
+
+                    if is_valid or not cfg.is_random or cfg.fixed_positions is not None:
                         break
                 
                 sampled_azimuths.append(azimuth)
@@ -229,7 +239,53 @@ class MultiViewEnvWrapper:
         self._cameras_added = True
         
         logger.info(f"Successfully added {len(self.added_camera_names)} cameras to environment")
-    
+
+    def resample_cameras(self, seed: int):
+        """Resample camera positions with a new random seed.
+
+        This allows generating different camera views for each trajectory in a dataset.
+        Uses the stored original XML (before any camera additions) as a clean base.
+
+        Args:
+            seed: Random seed for reproducible but different camera sampling.
+        """
+        if self._original_xml is None:
+            raise RuntimeError("Cannot resample: original XML not stored. "
+                               "Call _add_cameras_to_env() first.")
+
+        # Reset state for re-adding cameras
+        self.added_camera_names = []
+        self._sampled_params = {}
+        self._cameras_added = False
+        self._modified_xml = None
+
+        # Restore original XML in the sim so _add_cameras_to_env reads clean XML
+        sim = self._get_sim()
+        if sim is not None:
+            # We need to reload from original XML first
+            base_env = self._get_base_env()
+            base_env.reset_from_xml_string(self._original_xml)
+            base_env.sim.reset()
+            base_env.sim.set_state_from_flattened(self._original_state)
+            base_env.sim.forward()
+
+        # Update seed and re-add cameras
+        self.config.seed = seed
+        self._add_cameras_to_env()
+
+        logger.info(f"Resampled cameras with seed={seed}: {self.added_camera_names}")
+
+    def _get_base_env(self):
+        """Get the base robosuite environment object."""
+        if hasattr(self.env, 'env') and hasattr(self.env.env, 'reset_from_xml_string'):
+            return self.env.env
+        elif hasattr(self.env, 'base_env') and hasattr(self.env.base_env, 'reset_from_xml_string'):
+            return self.env.base_env
+        elif hasattr(self.env, 'reset_from_xml_string'):
+            return self.env
+        else:
+            raise RuntimeError("Cannot find reset_from_xml_string method on environment")
+
     def _add_cameras_with_zones(self, xml: str, rng: np.random.Generator) -> str:
         """Add cameras distributed across predefined sampling zones.
         
@@ -646,6 +702,8 @@ class MultiViewEnvWrapper:
             base_env = self.env.env
         elif hasattr(self.env, 'base_env') and hasattr(self.env.base_env, 'reset_from_xml_string'):
             base_env = self.env.base_env
+        elif hasattr(self.env, 'reset_from_xml_string'):
+            base_env = self.env
         else:
             raise RuntimeError("Cannot find reset_from_xml_string method on environment")
         
@@ -862,19 +920,40 @@ class MultiViewEnvWrapper:
     
     def reset(self, **kwargs):
         """Reset the environment."""
-        return self.env.reset(**kwargs)
+        obs = self.env.reset(**kwargs)
+
+        # Add observations from additional cameras (same as step / reset_to).
+        if self._cameras_added and self.added_camera_names and obs is not None:
+            obs = self._add_camera_observations(obs)
+
+        return obs
     
     def reset_to(self, state, **kwargs):
         """Reset to a specific state, preserving added cameras."""
-        # If state contains "model" (XML), replace it with our modified XML
-        # to preserve the added cameras
-        if self._cameras_added and self._modified_xml is not None and isinstance(state, dict) and "model" in state:
-            # Create a copy of state with our modified XML
-            modified_state = state.copy()
-            modified_state["model"] = self._modified_xml
-            obs = self.env.reset_to(modified_state, **kwargs)
+        if hasattr(self.env, 'reset_to'):
+            # If state contains "model" (XML), replace it with our modified XML
+            # to preserve the added cameras
+            if self._cameras_added and self._modified_xml is not None and isinstance(state, dict) and "model" in state:
+                # Create a copy of state with our modified XML
+                modified_state = state.copy()
+                modified_state["model"] = self._modified_xml
+                obs = self.env.reset_to(modified_state, **kwargs)
+            else:
+                obs = self.env.reset_to(state, **kwargs)
         else:
-            obs = self.env.reset_to(state, **kwargs)
+            # Raw robosuite env: use sim state setting directly
+            if isinstance(state, dict) and "states" in state:
+                state_val = state["states"]
+            else:
+                state_val = state
+            import numpy as np
+            if isinstance(state_val, np.ndarray) and hasattr(self.env, 'sim'):
+                self.env.sim.set_state_from_flattened(state_val)
+                self.env.sim.forward()
+            if hasattr(self.env, '_get_observations'):
+                obs = self.env._get_observations()
+            else:
+                obs = self.env.reset()
 
         # Add observations from additional cameras
         if self._cameras_added and self.added_camera_names and obs is not None:
@@ -913,7 +992,15 @@ class MultiViewEnvWrapper:
 
                 # MuJoCo renders images upside down, so flip them
                 obs[f"{cam_name}_image"] = rgb[::-1]
-                obs[f"{cam_name}_depth"] = depth[::-1]
+                depth_flipped = depth[::-1]
+                # Linearize depth from MuJoCo z-buffer [0,1] to metric depth (meters)
+                from demo_aug.utils.camera_utils import get_real_depth_map
+                depth_flipped = get_real_depth_map(base_env.sim, depth_flipped)
+                # Ensure depth has trailing channel dim (H, W, 1) to match
+                # robosuite's standard observation format.
+                if depth_flipped.ndim == 2:
+                    depth_flipped = depth_flipped[..., None]
+                obs[f"{cam_name}_depth"] = depth_flipped
 
             except Exception as e:
                 logger.warning(f"Failed to render camera {cam_name}: {e}")

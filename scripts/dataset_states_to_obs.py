@@ -55,6 +55,7 @@ import json
 import h5py
 import argparse
 import numpy as np
+import xml.etree.ElementTree as ET
 from copy import deepcopy
 from tqdm import tqdm
 
@@ -163,6 +164,10 @@ def compute_tcp_pixel_data(h, w, tcp_pose, camera_extrinsics, camera_intrinsics)
         - camera_intrinsics: camera intrinsic matrix
         - camera_extrinsics: camera extrinsic matrix
     """
+    # This function must *always* return a dict (never None) so that the
+    # resulting HDF5 has consistent per-timestep array lengths. If the TCP is
+    # outside the image bounds (or behind the camera), we still return the
+    # camera-frame pose and mark tcp_in_frame=0.
     try:
         # Extract position and quaternion from TCP pose
         gripper_pos = tcp_pose[:3]
@@ -180,103 +185,94 @@ def compute_tcp_pixel_data(h, w, tcp_pose, camera_extrinsics, camera_intrinsics)
         world_to_camera = camera_extrinsics
         gripper_in_camera = world_to_camera @ gripper_transform
 
-        # Project gripper position to image coordinates
+        # Camera-frame pose
         gripper_pos_camera = gripper_in_camera[:3, 3]
         gripper_orn_camera = gripper_in_camera[:3, :3]
-        # transform gripper_orn_camera to quaternion
         gripper_quat_camera = rotation_matrix_to_quaternion(gripper_orn_camera)
-        depth = gripper_pos_camera[2]
+        depth = float(gripper_pos_camera[2])
 
-        if depth <= 0:  # Behind camera
-            return None
+        # Project to image plane (if in front of camera)
+        u = float("nan")
+        v = float("nan")
+        in_front = depth > 0
+        if in_front:
+            pixel_coords = camera_intrinsics @ gripper_pos_camera
+            pixel_coords = pixel_coords / pixel_coords[2]
+            u = float(pixel_coords[0])
+            v = float(pixel_coords[1])
 
-        # Project to image plane
-        pixel_coords = camera_intrinsics @ gripper_pos_camera
-        pixel_coords = pixel_coords / pixel_coords[2]
+        in_frame = bool(in_front and (0.0 <= u < float(w)) and (0.0 <= v < float(h)))
 
-        u, v = int(pixel_coords[0]), int(pixel_coords[1])
+        # Calculate direction vectors in image space (only meaningful if in front)
+        tcp_dir_x = np.array([0.0, 0.0], dtype=np.float32)
+        tcp_dir_y = np.array([0.0, 0.0], dtype=np.float32)
+        tcp_dir_z = np.array([0.0, 0.0], dtype=np.float32)
 
-        # Check if coordinates are within image bounds
-        if not (0 <= u < w and 0 <= v < h):
-            return None
+        if in_front:
+            axis_length = 1.0
+            x_axis_camera = gripper_in_camera[:3, 0] * axis_length
+            y_axis_camera = gripper_in_camera[:3, 1] * axis_length
+            z_axis_camera = gripper_in_camera[:3, 2] * axis_length
 
-        # Calculate direction vectors for X and Y axes
-        axis_length = 1
+            x_axis_end_camera = gripper_pos_camera + x_axis_camera
+            if x_axis_end_camera[2] <= 0:
+                if (gripper_pos_camera[2] > 0) and (x_axis_camera[2] < 0):
+                    scale = gripper_pos_camera[2] / x_axis_camera[2]
+                    x_axis_camera = x_axis_camera * scale
+                    x_axis_end_camera = gripper_pos_camera + x_axis_camera * 0.99
 
-        # Extract axes from rotation matrix in camera coordinates
-        x_axis_camera = gripper_in_camera[:3, 0] * axis_length
-        y_axis_camera = gripper_in_camera[:3, 1] * axis_length
-        z_axis_camera = gripper_in_camera[:3, 2] * axis_length
+            y_axis_end_camera = gripper_pos_camera + y_axis_camera
+            if y_axis_end_camera[2] <= 0:
+                if (gripper_pos_camera[2] > 0) and (y_axis_camera[2] < 0):
+                    scale = gripper_pos_camera[2] / y_axis_camera[2]
+                    y_axis_camera = y_axis_camera * scale
+                    y_axis_end_camera = gripper_pos_camera + y_axis_camera * 0.99
 
-        # Project axis endpoints
-        x_axis_end_camera = gripper_pos_camera + x_axis_camera
-        if x_axis_end_camera[2] <= 0:
-            if (gripper_pos_camera[2] > 0) and (x_axis_camera[2] < 0):
-                scale = gripper_pos_camera[2] / x_axis_camera[2]
-                x_axis_camera = x_axis_camera * scale
-                x_axis_end_camera = gripper_pos_camera + x_axis_camera * 0.99  # make sure in front of the camera
-        y_axis_end_camera = gripper_pos_camera + y_axis_camera
-        if y_axis_end_camera[2] <= 0:
-            if (gripper_pos_camera[2] > 0) and (y_axis_camera[2] < 0):
-                scale = gripper_pos_camera[2] / y_axis_camera[2]
-                y_axis_camera = y_axis_camera * scale
-                y_axis_end_camera = gripper_pos_camera + y_axis_camera * 0.99  # make sure in front of the camera
-        z_axis_end_camera = gripper_pos_camera + z_axis_camera
-        if z_axis_end_camera[2] <= 0:
-            if (gripper_pos_camera[2] > 0) and (z_axis_camera[2] < 0):
-                scale = gripper_pos_camera[2] / z_axis_camera[2]
-                z_axis_camera = z_axis_camera * scale
-                z_axis_end_camera = gripper_pos_camera + z_axis_camera * 0.99  # make sure in front of the camera
+            z_axis_end_camera = gripper_pos_camera + z_axis_camera
+            if z_axis_end_camera[2] <= 0:
+                if (gripper_pos_camera[2] > 0) and (z_axis_camera[2] < 0):
+                    scale = gripper_pos_camera[2] / z_axis_camera[2]
+                    z_axis_camera = z_axis_camera * scale
+                    z_axis_end_camera = gripper_pos_camera + z_axis_camera * 0.99
 
-        # Calculate direction vectors in image space
-        tcp_dir_x = np.array([0.0, 0.0])
-        tcp_dir_y = np.array([0.0, 0.0])
-        tcp_dir_z = np.array([0.0, 0.0])
+            if x_axis_end_camera[2] > 0:
+                x_end = camera_intrinsics @ x_axis_end_camera
+                x_end = x_end / x_end[2]
+                tcp_dir_x = np.array([float(x_end[0]) - u, float(x_end[1]) - v], dtype=np.float32)
 
-        # X-axis direction
-        if x_axis_end_camera[2] > 0:
-            x_axis_end_homogeneous = camera_intrinsics @ x_axis_end_camera
-            x_axis_end_homogeneous = x_axis_end_homogeneous / x_axis_end_homogeneous[2]
+            if y_axis_end_camera[2] > 0:
+                y_end = camera_intrinsics @ y_axis_end_camera
+                y_end = y_end / y_end[2]
+                tcp_dir_y = np.array([float(y_end[0]) - u, float(y_end[1]) - v], dtype=np.float32)
 
-            dir_x = x_axis_end_homogeneous[0] - u
-            dir_y = x_axis_end_homogeneous[1] - v
-
-            tcp_dir_x = np.array([dir_x, dir_y])
-
-        # Y-axis direction
-        if y_axis_end_camera[2] > 0:
-            y_axis_end_homogeneous = camera_intrinsics @ y_axis_end_camera
-            y_axis_end_homogeneous = y_axis_end_homogeneous / y_axis_end_homogeneous[2]
-
-            dir_x = y_axis_end_homogeneous[0] - u
-            dir_y = y_axis_end_homogeneous[1] - v
-
-            tcp_dir_y = np.array([dir_x, dir_y])
-
-        # Z-axis direction
-        if z_axis_end_camera[2] > 0:
-            z_axis_end_homogeneous = camera_intrinsics @ z_axis_end_camera
-            z_axis_end_homogeneous = z_axis_end_homogeneous / z_axis_end_homogeneous[2]
-
-            dir_x = z_axis_end_homogeneous[0] - u
-            dir_y = z_axis_end_homogeneous[1] - v
-
-            tcp_dir_z = np.array([dir_x, dir_y])
+            if z_axis_end_camera[2] > 0:
+                z_end = camera_intrinsics @ z_axis_end_camera
+                z_end = z_end / z_end[2]
+                tcp_dir_z = np.array([float(z_end[0]) - u, float(z_end[1]) - v], dtype=np.float32)
 
         return {
-            'tcp_pixel_coords': np.array([u, v, depth], dtype=np.float32),
-            'tcp_dir_x': tcp_dir_x.astype(np.float32),
-            'tcp_dir_y': tcp_dir_y.astype(np.float32),
-            'tcp_dir_z': tcp_dir_z.astype(np.float32),
-            'tcp_pos': gripper_pos_camera.astype(np.float32),
-            'tcp_orn': gripper_orn_camera.reshape(-1).astype(np.float32),
-            'tcp_quat': gripper_quat_camera.astype(np.float32),  # [qw, qx, qy, qz]
-            # 'camera_intrinsics': camera_intrinsics.astype(np.float32),
-            # 'camera_extrinsics': camera_extrinsics.astype(np.float32)
+            "tcp_in_frame": np.float32(1.0 if in_frame else 0.0),
+            "tcp_pixel_coords": np.array([u, v, depth], dtype=np.float32),
+            "tcp_dir_x": tcp_dir_x,
+            "tcp_dir_y": tcp_dir_y,
+            "tcp_dir_z": tcp_dir_z,
+            "tcp_pos": gripper_pos_camera.astype(np.float32),
+            "tcp_orn": gripper_orn_camera.reshape(-1).astype(np.float32),
+            "tcp_quat": gripper_quat_camera.astype(np.float32),  # [qw, qx, qy, qz]
         }
 
-    except Exception as e:
-        return None
+    except Exception:
+        # Return consistent placeholder values so we don't drop keys.
+        return {
+            "tcp_in_frame": np.float32(0.0),
+            "tcp_pixel_coords": np.array([np.nan, np.nan, np.nan], dtype=np.float32),
+            "tcp_dir_x": np.array([0.0, 0.0], dtype=np.float32),
+            "tcp_dir_y": np.array([0.0, 0.0], dtype=np.float32),
+            "tcp_dir_z": np.array([0.0, 0.0], dtype=np.float32),
+            "tcp_pos": np.array([np.nan, np.nan, np.nan], dtype=np.float32),
+            "tcp_orn": np.full((9,), np.nan, dtype=np.float32),
+            "tcp_quat": np.array([np.nan, np.nan, np.nan, np.nan], dtype=np.float32),
+        }
 
 
 def extract_trajectory(
@@ -391,10 +387,11 @@ def extract_trajectory(
                 camera_intrinsics=K,
             )
 
-            if tcp_data is not None:
-                for data_key, data_val in tcp_data.items():
-                    observation[f"{cam_name}_{data_key}"] = data_val
-            else:
+            for data_key, data_val in tcp_data.items():
+                observation[f"{cam_name}_{data_key}"] = data_val
+
+            in_frame = tcp_data.get("tcp_in_frame", np.float32(0.0))
+            if float(in_frame) < 0.5:
                 tcp_miss_counts[cam_name] += 1
 
     # iteration variable @t is over "next obs" indices
@@ -505,15 +502,31 @@ def get_camera_info(
     return camera_info
 
 
+def inject_camera_fov_into_xml(xml_str, camera_name, fov):
+    """
+    Modify a named camera's FOV in a MuJoCo model XML string.
+
+    Args:
+        xml_str (str): MuJoCo model XML
+        camera_name (str): name of the camera to modify (e.g. "agentview")
+        fov (float): new vertical field-of-view in degrees
+
+    Returns:
+        str: modified XML string
+    """
+    root = ET.fromstring(xml_str)
+    for camera in root.iter("camera"):
+        if camera.get("name") == camera_name:
+            camera.set("fovy", str(fov))
+    return ET.tostring(root, encoding="unicode")
+
+
 def dataset_states_to_obs(args):
     if args.depth:
         assert len(args.camera_names) > 0, "must specify camera names if using depth"
 
-    # Check if multi-view is enabled and auto-enable depth for SAVLA compatibility
+    # Check if multi-view is enabled (optional). Depth remains user-controlled.
     multi_view_config = create_config_from_args(args, args.camera_height, args.camera_width)
-    if multi_view_config is not None and not args.depth:
-        print("[INFO] Multi-view enabled: automatically enabling depth for SAVLA compatibility")
-        args.depth = True
 
     # create environment to use for data processing
     env_meta = FileUtils.get_env_metadata_from_dataset(dataset_path=args.dataset)
@@ -552,6 +565,15 @@ def dataset_states_to_obs(args):
         # Print configuration summary with validation warnings
         env.print_config_summary()
 
+        # If camera_fov is set, also inject it into the wrapper's cached XML.
+        # The wrapper replaces state["model"] with its cached _modified_xml on
+        # every reset_to(), which would discard per-episode FOV injections.
+        if args.camera_fov is not None and hasattr(env, '_modified_xml') and env._modified_xml is not None:
+            env._modified_xml = inject_camera_fov_into_xml(
+                env._modified_xml, "agentview", args.camera_fov
+            )
+            print(f"Injected camera_fov={args.camera_fov} into multi-view cached XML")
+
     print("==== Using environment with the following metadata ====")
     print(json.dumps(env.serialize(), indent=4))
     print("")
@@ -561,7 +583,13 @@ def dataset_states_to_obs(args):
 
     # list of all demonstration episodes (sorted in increasing number order)
     f = h5py.File(args.dataset, "r")
-    demos = list(f["data"].keys())
+    if args.demo_keys is not None:
+        demos = list(args.demo_keys)
+        missing = [d for d in demos if f"data/{d}" not in f]
+        if missing:
+            raise KeyError(f"Demo keys not found in dataset: {missing}")
+    else:
+        demos = list(f["data"].keys())
     inds = np.argsort([int(elem[5:]) for elem in demos])
     demos = [demos[i] for i in inds]
 
@@ -587,12 +615,25 @@ def dataset_states_to_obs(args):
     for ind in tqdm(range(len(demos))):
         ep = demos[ind]
 
+        # Resample cameras for each trajectory if requested
+        if getattr(args, 'resample_per_trajectory', False) and isinstance(env, MultiViewEnvWrapper):
+            traj_seed = (args.multi_view_seed or 42) + ind
+            env.resample_cameras(seed=traj_seed)
+            # Update camera names in case they changed
+            args.camera_names = env.camera_names
+
         # prepare initial state to reload from
         states = f["data/{}/states".format(ep)][()]
         initial_state = dict(states=states[0])
         if is_robosuite_env:
-            initial_state["model"] = f["data/{}".format(ep)].attrs["model_file"]
+            model_file = f["data/{}".format(ep)].attrs.get("model_file", None)
+            if model_file is not None and str(model_file) != "":
+                initial_state["model"] = model_file
             initial_state["ep_meta"] = f["data/{}".format(ep)].attrs.get("ep_meta", None)
+            if args.camera_fov is not None and "model" in initial_state:
+                initial_state["model"] = inject_camera_fov_into_xml(
+                    initial_state["model"], "agentview", args.camera_fov
+                )
 
         # extract obs, rewards, dones
         actions = f["data/{}/actions".format(ep)][()]
@@ -658,7 +699,7 @@ def dataset_states_to_obs(args):
                 ep_data_grp.create_dataset("action_dict/{}".format(k), data=np.array(action_dict[k][()]))
 
         # episode metadata
-        if is_robosuite_env:
+        if is_robosuite_env and "model" in traj["initial_state_dict"]:
             ep_data_grp.attrs["model_file"] = traj["initial_state_dict"]["model"] # model xml for this episode
         if "ep_meta" in f["data/{}".format(ep)].attrs:
             ep_data_grp.attrs["ep_meta"] = f["data/{}".format(ep)].attrs["ep_meta"]
@@ -707,6 +748,13 @@ if __name__ == "__main__":
         default=None,
         help="(optional) stop after n trajectories are processed",
     )
+    parser.add_argument(
+        "--demo_keys",
+        type=str,
+        nargs="+",
+        default=None,
+        help="(optional) explicit list of demo keys to convert (e.g. demo_0 demo_3). Overrides ordering logic.",
+    )
 
     # flag for reward shaping
     parser.add_argument(
@@ -740,9 +788,17 @@ if __name__ == "__main__":
 
     # flag for including depth observations per camera
     parser.add_argument(
-        "--depth", 
+        "--depth",
         action='store_true',
         help="(optional) use depth observations for each camera",
+    )
+
+    # override agentview camera field-of-view (default 45 in pegs_arena.xml)
+    parser.add_argument(
+        "--camera_fov",
+        type=float,
+        default=None,
+        help="(optional) override agentview camera FOV in degrees (default: use value from model XML, typically 45)",
     )
 
     # specifies how the "done" signal is written. If "0", then the "done" signal is 1 wherever 
@@ -787,6 +843,14 @@ if __name__ == "__main__":
 
     # Multi-view camera options (centralized in multi_view_config.py)
     add_multi_view_args(parser)
+
+    # Per-trajectory camera resampling
+    parser.add_argument(
+        "--resample_per_trajectory",
+        action="store_true",
+        help="Resample random camera positions for each trajectory. "
+             "Creates diverse viewpoints across the dataset. Requires --enable_multi_view.",
+    )
 
     # TCP coverage enforcement
     parser.add_argument(
