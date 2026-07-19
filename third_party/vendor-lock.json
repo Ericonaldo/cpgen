@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "vendors": {
+    "robosuite": {
+      "path": "third_party/robosuite-141",
+      "url": "https://github.com/ARISE-Initiative/robosuite.git",
+      "commit": "b9d8d3de5e3dfd1724f4a0e6555246c460407daa",
+      "vcs_url": "git+https://github.com/ARISE-Initiative/robosuite.git@b9d8d3de5e3dfd1724f4a0e6555246c460407daa",
+      "version": "1.4.1",
+      "version_file": "robosuite/__init__.py",
+      "version_regex": "__version__\\s*=\\s*[\\\"']([^\\\"']+)[\\\"']"
+    },
+    "robomimic": {
+      "path": "third_party/robomimic-031",
+      "url": "https://github.com/ARISE-Initiative/robomimic.git",
+      "commit": "d0b37cf214bd24fb590d182edb6384333f67b661",
+      "vcs_url": "git+https://github.com/ARISE-Initiative/robomimic.git@d0b37cf214bd24fb590d182edb6384333f67b661",
+      "version": "0.3.1",
+      "version_file": "robomimic/__init__.py",
+      "version_regex": "__version__\\s*=\\s*[\\\"']([^\\\"']+)[\\\"']"
+    },
+    "mimicgen": {
+      "path": "third_party/mimicgen",
+      "url": "https://github.com/NVlabs/mimicgen.git",
+      "commit": "72bd767c255545f462e7ccfb2731f2e5d4c1d9bb",
+      "vcs_url": "git+https://github.com/NVlabs/mimicgen.git@72bd767c255545f462e7ccfb2731f2e5d4c1d9bb",
+      "version": "1.0.1",
+      "version_file": "mimicgen/__init__.py",
+      "version_regex": "__version__\\s*=\\s*[\\\"']([^\\\"']+)[\\\"']",
+      "patch": {
+        "path": "third_party/patches/mimicgen-local.patch",
+        "sha256": "ed30d32cc919da7ddacbdadb1a1417ebdb704b6f45ed07c628182defb07d9e4f"
+      }
+    },
+    "cpgen-envs": {
+      "path": "third_party/cpgen-envs",
+      "url": "https://github.com/kevin-thankyou-lin/cpgen-envs.git",
+      "commit": "c4eea73e642afbc0426d06a4dd31dba0ea6b5da9",
+      "vcs_url": "git+https://github.com/kevin-thankyou-lin/cpgen-envs.git@c4eea73e642afbc0426d06a4dd31dba0ea6b5da9",
+      "version": "0.0.1",
+      "version_file": "cpgen_envs/__init__.py",
+      "version_regex": "__version__\\s*=\\s*[\\\"']([^\\\"']+)[\\\"']",
+      "patch": {
+        "path": "third_party/patches/cpgen-envs-rs14.patch",
+        "sha256": "e511432ffdea3a4cf6b2b006f3464f4471c42411ad56ea6f2ed4b19ae0e134db"
+      }
+    },
+    "curobo": {
+      "path": "third_party/curobo",
+      "url": "https://github.com/NVlabs/curobo.git",
+      "commit": "d64c4b005459db10c5dd867d8b30a87d5bda9bdb",
+      "vcs_url": "git+https://github.com/NVlabs/curobo.git@d64c4b005459db10c5dd867d8b30a87d5bda9bdb",
+      "version": "0.7.8",
+      "version_source": "git_tag"
+    }
+  }
+}

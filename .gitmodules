@@ -1,0 +1,15 @@
+[submodule "third_party/cpgen-envs"]
+	path = third_party/cpgen-envs
+	url = https://github.com/kevin-thankyou-lin/cpgen-envs.git
+[submodule "third_party/curobo"]
+	path = third_party/curobo
+	url = https://github.com/NVlabs/curobo.git
+[submodule "third_party/mimicgen"]
+	path = third_party/mimicgen
+	url = https://github.com/NVlabs/mimicgen.git
+[submodule "third_party/robomimic-031"]
+	path = third_party/robomimic-031
+	url = https://github.com/ARISE-Initiative/robomimic.git
+[submodule "third_party/robosuite-141"]
+	path = third_party/robosuite-141
+	url = https://github.com/ARISE-Initiative/robosuite.git
