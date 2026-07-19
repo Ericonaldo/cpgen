@@ -40,6 +40,7 @@ from demo_aug.envs.motion_planners.curobo_utils import (
     mjmodel_to_mjgeoms,
     update_curobo_world_config,
 )
+from demo_aug.robosuite_backend import managed_mujoco_renderer
 
 
 def get_configs_with_straight_line_cost(
@@ -364,7 +365,7 @@ class CuroboMotionPlanner(MotionPlanner):
                 qpos = data.qpos.copy()
                 qvel = data.qvel.copy()
                 qacc = data.qacc.copy()
-                with mujoco.Renderer(model) as renderer:
+                with managed_mujoco_renderer(mujoco.Renderer, model) as renderer:
                     for i in range(plan.position.shape[0]):
                         # update env's robot joint state
                         self.env.robots[0].set_robot_joint_positions(
@@ -443,7 +444,7 @@ class CuroboMotionPlanner(MotionPlanner):
                 qpos = data.qpos.copy()
                 qvel = data.qvel.copy()
                 qacc = data.qacc.copy()
-                with mujoco.Renderer(model) as renderer:
+                with managed_mujoco_renderer(mujoco.Renderer, model) as renderer:
                     if plan is not None:
                         positions = plan.position[0].cpu().numpy()
                     else:

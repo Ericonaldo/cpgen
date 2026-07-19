@@ -4,6 +4,8 @@ To test generated dataset, run the following command:
 python robomimic/scripts/playback_dataset.py --dataset ../demo-aug/datasets/generated/2024-10-10.hdf5  --video_path test.mp4
 """
 
+from __future__ import annotations
+
 import copy
 import logging
 import os
@@ -52,7 +54,6 @@ from scipy.spatial.transform import Rotation as R
 from tqdm import tqdm
 
 import demo_aug
-import wandb
 from demo_aug import transform_keypoints
 from demo_aug.envs.motion_planners.base_mp import MotionPlanner
 from demo_aug.envs.motion_planners.curobo_mp import (
@@ -66,6 +67,13 @@ from demo_aug.envs.motion_planners.eef_interp_mp import (
     EEFInterpMotionPlanner,
 )
 from demo_aug.envs.motion_planners.indexed_configuration import IndexedConfiguration
+from demo_aug.robosuite_backend import (
+    convert_frame_name_to_rs14,
+    eef_body_name_for_rs14,
+    resolve_cpgen_controller_for_rs14,
+    resolve_mujoco_model,
+    site_rotation_to_xyzw_quaternion,
+)
 from demo_aug.utils.file_utils import count_total_demos, merge_demo_files
 from demo_aug.utils.logging_utils import setup_file_logger
 from demo_aug.utils.mathutils import make_pose, random_pose
@@ -240,6 +248,7 @@ class CPEnv:
         Returns:
             collided (bool): True if a collision is detected, False otherwise.
         """
+        robot_body_name = convert_frame_name_to_rs14(robot_body_name)
         # Get robot geometries
         robot_geoms = get_subtree_geom_ids_by_group(
             model, model.body(robot_body_name).id, group=0
@@ -279,8 +288,10 @@ class CPEnv:
 
     def let_env_settle(self, num_steps: int = 6) -> Dict:
         action = np.zeros(7)
-        action[:3] = self.env.get_observation()["robot0_eef_pos"]
-        action[3:6] = quat2axisangle(self.env.get_observation()["robot0_eef_quat_site"])
+        action[:3] = self.get_observation()["robot0_eef_pos"]
+        action[3:6] = quat2axisangle(
+            self.get_observation()["robot0_eef_quat_site"]
+        )
         for _ in range(num_steps):
             obs, _, _, _ = self.env.step(action)
             self._update_obs(obs)
@@ -293,11 +304,21 @@ class CPEnv:
         self._update_obs(obs)
         return obs
 
+    def reset_to(self, state: Dict) -> Dict:
+        obs = self.env.reset_to(state)
+        self._update_obs(obs)
+        return obs
+
     def get_obj_geoms_size(self, obj_name: str) -> Dict[str, np.ndarray]:
         # Code to get object size
         return {}
 
     def _update_obs(self, obs: Dict):
+        if "robot0_eef_quat_site" not in obs:
+            robot = self.env.env.robots[0]
+            obs["robot0_eef_quat_site"] = site_rotation_to_xyzw_quaternion(
+                self.env.env.sim.data.site_xmat[robot.eef_site_id]
+            )
         for obj_name in self.possible_task_relevant_obj_names:
             obs[obj_name + "_pose"] = self.get_obj_pose(obj_name)
             obs[obj_name + "_geoms_size"] = self.get_obj_geoms_size(obj_name)
@@ -305,9 +326,11 @@ class CPEnv:
         obs["robot_q"] = np.concatenate(
             [obs["robot0_joint_pos"], obs["robot0_gripper_qpos"]]
         )
-        arm = self.env.env.robots[0].arms[0]
+        robot = self.env.env.robots[0]
+        arms = getattr(robot, "arms", None)
+        arm = arms[0] if arms else None
         obs["robot0_eef_pos_body"] = self.env.env.sim.data.get_body_xpos(
-            self.env.env.robots[0].robot_model.eef_name[arm]
+            eef_body_name_for_rs14(robot.robot_model.eef_name, arm)
         )
 
     def get_collision_geometry(self):
@@ -559,8 +582,16 @@ class Constraint:
         symmetries = [Symmetry.from_dict(sym) for sym in data.get("symmetries", [])]
 
         # 2) Convert Python lists back to np.ndarray for any keypoint data
-        keypoints_robot = data.get("keypoints_robot_link_frame_annotation", {})
-        keypoints_obj = data.get("keypoints_obj_frame_annotation", {})
+        keypoints_robot = data.get("keypoints_robot_link_frame_annotation") or {}
+        keypoints_obj = data.get("keypoints_obj_frame_annotation") or {}
+        attachment_frames = data.get("obj_to_parent_attachment_frame")
+        if attachment_frames is not None:
+            attachment_frames = {
+                obj_name: convert_frame_name_to_rs14(parent_frame)
+                if parent_frame is not None
+                else None
+                for obj_name, parent_frame in attachment_frames.items()
+            }
 
         return cls(
             name=data.get("name"),
@@ -573,7 +604,7 @@ class Constraint:
             reflect_eef=data.get("reflect_eef", True),
             during_constraint_behavior=data.get("during_constraint_behavior"),
             post_constraint_behavior=data.get("post_constraint_behavior", []),
-            obj_to_parent_attachment_frame=data.get("obj_to_parent_attachment_frame"),
+            obj_to_parent_attachment_frame=attachment_frames,
             reset_near_random_constraint_state=data.get(
                 "reset_near_random_constraint_state", False
             ),
@@ -1124,6 +1155,10 @@ class ConstraintGenerator:
         keypoints_robot_link_frame = copy.deepcopy(
             constraint.keypoints_robot_link_frame_annotation
         )
+        keypoints_robot_link_frame = {
+            convert_frame_name_to_rs14(frame): keypoints
+            for frame, keypoints in keypoints_robot_link_frame.items()
+        }
         keypoints_obj_frame = copy.deepcopy(constraint.keypoints_obj_frame_annotation)
         src_obj_pose: Dict[str, np.ndarray] = defaultdict(list)
         src_obs: Dict[str, List[Dict[str, np.ndarray]]] = defaultdict(list)
@@ -1135,7 +1170,7 @@ class ConstraintGenerator:
             and demo.env_args.get("env_version", None) is not None
             and demo.env_args["env_version"] == robosuite.__version__
         ):
-            env.env.reset_to({"states": demo.states[0], "model": demo.model_file})
+            env.reset_to({"states": demo.states[0], "model": demo.model_file})
             # TODO: maybe do sync_fixed_joint_objects_in_mjmodel except inverse i.e. get values from xml and update mjmodel
             # unfortunately, resetting model file is really slow;
             # +1 reason for using original source demo + annotations
@@ -1154,7 +1189,7 @@ class ConstraintGenerator:
                 [] for _ in range(len(timesteps))
             ]
             for timestep_idx, timestep in enumerate(timesteps):
-                env.env.reset_to({"states": demo.states[timestep]})
+                env.reset_to({"states": demo.states[timestep]})
                 object_name = object_names[0]
                 for (
                     robot_link,
@@ -1190,7 +1225,7 @@ class ConstraintGenerator:
 
             # Calculate keypoints for second object
             for timestep_idx, timestep in enumerate(timesteps):
-                env.env.reset_to({"states": demo.states[timestep]})
+                env.reset_to({"states": demo.states[timestep]})
                 assert keypoints_obj_frame.get(object_names[0]) is not None, (
                     f"Keyframes for object {object_names[0]} not found. "
                     "Ensure that the first object in the constraint has keypoints."
@@ -1218,7 +1253,7 @@ class ConstraintGenerator:
         src_gripper_action = src_action[:, -1:]
 
         for t in timesteps:
-            obs = env.env.reset_to({"states": demo.states[t]})
+            obs = env.reset_to({"states": demo.states[t]})
             for obj_name in object_names:
                 src_obj_pose[obj_name].append(env.get_obj_pose(obj_name))
                 src_obj_transform[obj_name] = env.get_obj_geom_transform(obj_name)
@@ -1952,6 +1987,8 @@ def optimize_robot_configuration_kp(
         return f < 5e-4  # Terminate early if below threshold
 
     def callback_local(intermediate_result):
+        if not hasattr(intermediate_result, "fun"):
+            return objective(np.asarray(intermediate_result)) < 5e-4
         if intermediate_result.fun < 5e-4:
             raise StopIteration("Terminating optimization as threshold reached.")
 
@@ -3393,6 +3430,7 @@ def anonymize_model_file_paths(xml_str: str) -> str:
 
     return ET.tostring(root, pretty_print=True, encoding="unicode")
 
+
 @dataclass
 class SystemNoiseConfig:
     motion_segment_noise_magnitude: Union[float, List[float]] = field(
@@ -3584,7 +3622,11 @@ class DemoGenerator:
             model = eef_configuration.model
             data = eef_configuration.data
             robot_geoms = get_subtree_geom_ids_by_group(
-                model, model.body("gripper0_right_right_gripper").id, group=0
+                model,
+                model.body(
+                    convert_frame_name_to_rs14("gripper0_right_right_gripper")
+                ).id,
+                group=0,
             )
             # robot_geoms = get_subtree_geom_ids_by_group(model, model.body("robot0_link0").id, group=0)
             body_ids = get_top_level_bodies(
@@ -4028,6 +4070,8 @@ def export_conda_environment(
 
 def save_to_wandb(file_path: str, artifact_name: str, artifact_type: str):
     """Save a file to wandb as an artifact."""
+    import wandb
+
     artifact = wandb.Artifact(name=artifact_name, type=artifact_type)
     artifact.add_file(file_path)
     wandb.log_artifact(artifact)
@@ -4300,6 +4344,28 @@ class Config:
             print("Please ensure the demo file is available at the specified path.")
 
 
+def make_robot_mink_configuration(
+    model: mujoco.MjModel, robot_joint_names: Optional[List[str]] = None
+):
+    robot_idxs = None
+    robot_dof_idxs = None
+    if robot_joint_names is not None:
+        joint_indices = get_joint_name_to_indexes(model)
+        robot_idxs = np.concatenate(
+            [joint_indices[joint_name] for joint_name in robot_joint_names]
+        )
+        dof_indices = []
+        for joint_name in robot_joint_names:
+            joint_id = model.joint(joint_name).id
+            start = model.jnt_dofadr[joint_id]
+            stop = model.jnt_dofadr[joint_id + 1] if joint_id + 1 < model.njnt else model.nv
+            dof_indices.extend(range(start, stop))
+        robot_dof_idxs = np.asarray(dof_indices, dtype=int)
+    return IndexedConfiguration(
+        model, robot_idxs=robot_idxs, robot_dof_idxs=robot_dof_idxs
+    )
+
+
 def get_eef_configuration(
     model_xml: str,
     mj_model: mujoco.MjModel,
@@ -4317,20 +4383,19 @@ def get_eef_configuration(
             If False (default), a Configuration object is returned.
         gripper_joint_names (List[str], optional): The joint names of the gripper.
     """
+    eef_body_name = convert_frame_name_to_rs14("gripper0_right_right_gripper")
     xml = update_xml_with_mjmodel(
         model_xml,
         mj_model,
-        exclude_body_and_children=["gripper0_right_right_gripper"],
+        exclude_body_and_children=[eef_body_name],
     )
-    xml = remove_arm_keep_eef(xml, "robot0_base", "gripper0_right_right_gripper")
+    xml = remove_arm_keep_eef(xml, "robot0_base", eef_body_name)
     xml = remove_actuator_tag(
         xml
     )  # because may have removed certains arm joints that actuators correspond to
     xml = add_free_joint(
-        xml, "gripper0_right_right_gripper", "right_free_joint"
+        xml, eef_body_name, "right_free_joint"
     )  # add a free joint to the eef
-    with open("eef_and_env_model.xml", "w") as f:
-        f.write(xml)
     eef_and_env_model = mujoco.MjModel.from_xml_string(xml)
     if return_model_only:
         return eef_and_env_model
@@ -4395,6 +4460,7 @@ def get_robot_configuration(
 def main(cfg: Config):
     set_seed(cfg.seed)
     np.set_printoptions(suppress=True, precision=4)
+
     src_demos: List[Demo] = load_demos(
         cfg.demo_path,
         start_idx=cfg.load_demos_start_idx,
@@ -4416,8 +4482,6 @@ def main(cfg: Config):
     )
     ObsUtils.initialize_obs_utils_with_obs_specs(obs_modality_specs=dummy_spec)
     env_meta = FileUtils.get_env_metadata_from_dataset(dataset_path=cfg.demo_path)
-    # update controller config to use abs actions
-    env_meta["env_kwargs"]["controller_configs"]["control_delta"] = False
     if cfg.debug:
         env_meta["env_kwargs"]["use_camera_obs"] = False
         env_meta["env_kwargs"]["has_offscreen_renderer"] = True
@@ -4427,16 +4491,9 @@ def main(cfg: Config):
         env_meta["env_kwargs"]["has_offscreen_renderer"] = False
         viz_robot_kpts = False
 
-    from robosuite.controllers import load_composite_controller_config
-
-    if cfg.controller_type == "default":
-        controller_config = load_composite_controller_config(robot="Panda")
-        controller_config["body_parts"]["right"]["input_type"] = "absolute"
-        controller_config["body_parts"]["right"]["input_ref_frame"] = "world"
-    elif cfg.controller_type == "ik":
-        controller_config = load_composite_controller_config(
-            controller="demo_aug/configs/robosuite/panda_ik.json"
-        )
+    controller_config = resolve_cpgen_controller_for_rs14(
+        robot="Panda", requested=cfg.controller_type
+    )
     env_meta["env_kwargs"]["controller_configs"] = controller_config
     if cfg.initialization.initialization_noise_type is not None:
         env_meta["env_kwargs"]["initialization_noise"] = {
@@ -4500,8 +4557,15 @@ def main(cfg: Config):
         motion_planner = EEFInterpCuroboMotionPlanner(
             env.env,
             save_dir=cfg.motion_plan_save_dir,
-            mink_robot_configuration=Configuration(
-                env.env.env.robots[0].robot_model.mujoco_model,
+            mink_robot_configuration=make_robot_mink_configuration(
+                resolve_mujoco_model(
+                    env.env.env.robots[0].robot_model,
+                    env.env.env.sim.model._model,
+                ),
+                env.env.env.robots[0].robot_model.joints
+                + env.env.env.robots[0]
+                .robot_model.grippers["robot0_right_hand"]
+                .joints,
             ),
             curobo_goal_type=cfg.curobo_goal_type,
             robot_type=cfg.robot_type,
@@ -4620,10 +4684,10 @@ def main(cfg: Config):
         merge_demo_files(success_demo_save_paths, save_path=merge_demo_save_path)
 
     if fail_demo_save_paths:
-        merge_failure_demo_save_path = pathlib.Path(merge_demo_save_path).parent / (
-            str(pathlib.Path(merge_demo_save_path).stem)
-            + "_failures"
-            + str(pathlib.Path(merge_demo_save_path).suffix)
+        failure_base_path = merge_demo_save_path or fail_demo_save_paths[0]
+        merge_failure_demo_save_path = pathlib.Path(failure_base_path).parent / (
+            str(pathlib.Path(failure_base_path).stem)
+            + "_failures.hdf5"
         )
         merge_demo_files(fail_demo_save_paths, save_path=merge_failure_demo_save_path)
         # always save failure videos
@@ -4644,19 +4708,22 @@ def main(cfg: Config):
             )
 
             video_writer = imageio.get_writer(save_video_path, fps=20)
-            playback_trajectory_with_env(
-                env,
-                initial_state=initial_state,
-                states=demo["states"],
-                camera_names=["agentview", "frontview", "robot0_eye_in_hand"],
-                video_writer=video_writer,
-                video_skip=1,
-            )
+            try:
+                playback_trajectory_with_env(
+                    env,
+                    initial_state=initial_state,
+                    states=demo["states"],
+                    camera_names=["agentview", "frontview", "robot0_eye_in_hand"],
+                    video_writer=video_writer,
+                    video_skip=1,
+                )
+            finally:
+                video_writer.close()
             logging.info(
                 f"Saved video of controller tracking eef poses to {save_video_path}"
             )
 
-    if merge_demo_save_path is None:
+    if not success_demo_save_paths:
         logging.info("No successful demos to merge.")
         return
 
@@ -4682,6 +4749,8 @@ def main(cfg: Config):
     )
 
     if cfg.use_wandb:
+        import wandb
+
         wandb.log(
             {
                 "Final Success Rate": n_successes / trials,

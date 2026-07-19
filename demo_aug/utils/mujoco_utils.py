@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import datetime
 import logging
 import pathlib
@@ -55,6 +57,7 @@ def update_fixed_joint_objects_in_xml(model: MjModel, xml_string: str) -> str:
     Why? Some mujoco environments directly update the mujoco model state
     (especially for objects with fixed joints). Thus, syncing all joints wouldn't fully sync the models.
     """
+    model = getattr(model, "_model", model)
     # Parse XML from string
     root = etree.fromstring(xml_string.encode("utf-8"))
 
@@ -66,7 +69,7 @@ def update_fixed_joint_objects_in_xml(model: MjModel, xml_string: str) -> str:
             continue
 
         # Get the body ID in MjModel, ignoring if not found
-        body_id = model.body_name2id(body_name)
+        body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, body_name)
         if body_id < 0:
             continue
 
@@ -92,9 +95,6 @@ def update_fixed_joint_objects_in_xml(model: MjModel, xml_string: str) -> str:
     updated_xml_string = etree.tostring(
         root, encoding="utf-8", xml_declaration=True, pretty_print=True
     ).decode("utf-8")
-    # save updated xml to a file
-    with open("updated_xml.xml", "w") as f:
-        f.write(updated_xml_string)
     return updated_xml_string
 
 
@@ -930,6 +930,12 @@ def check_geom_collisions(
                 collisions.append((set_a, set_b))
                 return collisions  # Found a collision for this contact, no need to check further sets
 
+    if not hasattr(mujoco, "mj_geomDistance"):
+        distances = _rs14_contact_distances(
+            model, data, geom_pairs_set, collision_activation_dist
+        )
+        return [pair for pair, distance in distances if distance < collision_activation_dist]
+
     fromto = np.empty(6)
     for geoms_1, geoms_2 in geom_pairs_set:
         for geom_id_1 in geoms_1:
@@ -953,6 +959,30 @@ def check_geom_collisions(
     return collisions
 
 
+def _rs14_contact_distances(model, data, geom_pairs_set, activation_dist):
+    geom_ids = sorted(set().union(*(a | b for a, b in geom_pairs_set)))
+    original_margin = model.geom_margin[geom_ids].copy()
+    original_rbound = model.geom_rbound[geom_ids].copy()
+    try:
+        model.geom_margin[geom_ids] = np.maximum(original_margin, activation_dist)
+        model.geom_rbound[geom_ids] = original_rbound + activation_dist
+        mujoco.mj_fwdPosition(model, data)
+        distances = []
+        for index in range(data.ncon):
+            contact = data.contact[index]
+            for pair in geom_pairs_set:
+                set_a, set_b = pair
+                if (contact.geom1 in set_a and contact.geom2 in set_b) or (
+                    contact.geom2 in set_a and contact.geom1 in set_b
+                ):
+                    distances.append((pair, float(contact.dist)))
+        return distances
+    finally:
+        model.geom_margin[geom_ids] = original_margin
+        model.geom_rbound[geom_ids] = original_rbound
+        mujoco.mj_fwdPosition(model, data)
+
+
 def get_min_geom_distance(
     model: mujoco.MjModel,
     data: mujoco.MjData,
@@ -970,6 +1000,13 @@ def get_min_geom_distance(
         verbose (bool): If True, prints detailed distance information.
     """
     mujoco.mj_fwdPosition(model, data)  # Update positions and contacts
+
+    geom_pairs_set = {(frozenset(pair[0]), frozenset(pair[1])) for pair in geom_pairs}
+    if not hasattr(mujoco, "mj_geomDistance"):
+        distances = _rs14_contact_distances(
+            model, data, geom_pairs_set, activation_dist
+        )
+        return min([distance for _, distance in distances] or [activation_dist])
 
     fromto = np.empty(6)
     min_dist = activation_dist

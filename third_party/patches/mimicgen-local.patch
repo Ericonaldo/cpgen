@@ -1,43 +1,13 @@
 diff --git a/mimicgen/datagen/data_generator.py b/mimicgen/datagen/data_generator.py
-index bc070812dce171e24b3aa81bba4ff91baae98626..cd3d33be9b2423dd1fc3755ed72b72aa00d0da2e 100644
+index bc070812dce171e24b3aa81bba4ff91baae98626..d3d708331f0ce0e197573c712f4b18eab0cc2793 100644
 --- a/mimicgen/datagen/data_generator.py
 +++ b/mimicgen/datagen/data_generator.py
-@@ -179,6 +179,18 @@ class DataGenerator(object):
- 
-         return selected_src_demo_ind
- 
-+    def on_subtask_start(self, subtask_ind):
-+        pass
-+
-+    def postprocess_transformed_poses(
-+        self,
-+        *,
-+        subtask_ind,
-+        transformed_eef_poses,
-+        current_object_pose,
-+    ):
-+        return transformed_eef_poses
-+
-     def generate(
-         self,
-         env,
-@@ -259,6 +271,7 @@ class DataGenerator(object):
-         generated_src_demo_labels = [] # like @generated_src_demo_inds, but padded to align with size of @generated_actions
- 
-         for subtask_ind in range(len(self.task_spec)):
-+            self.on_subtask_start(subtask_ind)
- 
-             # some things only happen on first subtask
-             is_first_subtask = (subtask_ind == 0)
-@@ -306,13 +319,15 @@ class DataGenerator(object):
+@@ -306,13 +306,12 @@ class DataGenerator(object):
                  # we will interpolate to the first robot eef pose in this source segment, instead of the
                  # first robot target pose.
                  src_eef_poses = np.concatenate([src_subtask_eef_poses[0:1], src_subtask_target_poses], axis=0)
 +                # account for extra timestep added to @src_eef_poses
-+                src_subtask_gripper_actions = np.concatenate(
-+                    [src_subtask_gripper_actions[0:1], src_subtask_gripper_actions],
-+                    axis=0,
-+                )
++                src_subtask_gripper_actions = np.concatenate([src_subtask_gripper_actions[0:1], src_subtask_gripper_actions], axis=0)
              else:
                  # Source segment consists of just the target poses.
                  src_eef_poses = np.array(src_subtask_target_poses)
@@ -48,61 +18,3 @@ index bc070812dce171e24b3aa81bba4ff91baae98626..cd3d33be9b2423dd1fc3755ed72b72aa
              # Transform source demonstration segment using relevant object pose.
              if subtask_object_name is not None:
                  transformed_eef_poses = PoseUtils.transform_source_data_segment_using_object_pose(
-@@ -323,6 +338,12 @@ class DataGenerator(object):
-             else:
-                 # skip transformation if no reference object is provided
-                 transformed_eef_poses = src_eef_poses
-+
-+            transformed_eef_poses = self.postprocess_transformed_poses(
-+                subtask_ind=subtask_ind,
-+                transformed_eef_poses=transformed_eef_poses,
-+                current_object_pose=cur_object_pose,
-+            )
-             
-             # We will construct a WaypointTrajectory instance to keep track of robot control targets 
-             # that will be executed and then execute it.
-diff --git a/mimicgen/datagen/waypoint.py b/mimicgen/datagen/waypoint.py
-index fb1c53427a97d4228ff13b1403cf2f62f02f0d7d..1f6f7d2eb1310937953399ade2eac4413366c5ac 100644
---- a/mimicgen/datagen/waypoint.py
-+++ b/mimicgen/datagen/waypoint.py
-@@ -70,6 +70,21 @@ class WaypointSequence(object):
-             action_noise = action_noise * np.ones((num_timesteps, 1))
-         action_noise = action_noise.reshape(-1, 1)
- 
-+        if gripper_actions.shape[0] != num_timesteps:
-+            raise ValueError(
-+                "gripper_actions must have {} timesteps, got {}".format(
-+                    num_timesteps,
-+                    gripper_actions.shape[0],
-+                )
-+            )
-+        if action_noise.shape[0] != num_timesteps:
-+            raise ValueError(
-+                "action_noise must have {} timesteps, got {}".format(
-+                    num_timesteps,
-+                    action_noise.shape[0],
-+                )
-+            )
-+
-         # make WaypointSequence instance
-         sequence = [
-             Waypoint(
-@@ -208,7 +223,7 @@ class WaypointTrajectory(object):
-             # repeat the target @num_steps times
-             assert num_steps is not None
-             poses = np.array([pose for _ in range(num_steps)])
--            gripper_actions = np.array([[gripper] for _ in range(num_steps)])
-+            gripper_actions = np.array([gripper_action for _ in range(num_steps)])
-         else:
-             # linearly interpolate between the last pose and the new waypoint
-             last_waypoint = self.last_waypoint
-@@ -382,7 +397,8 @@ class WaypointTrajectory(object):
- 
-                 # maybe add noise to action
-                 if waypoint.noise is not None:
--                    action_pose += waypoint.noise * np.random.randn(*action_pose.shape)
-+                    if waypoint.noise != 0.0:
-+                        action_pose += waypoint.noise * np.random.randn(*action_pose.shape)
-                     action_pose = np.clip(action_pose, -1., 1.)
- 
-                 # add in gripper action

@@ -29,7 +29,7 @@
       "version_regex": "__version__\\s*=\\s*[\\\"']([^\\\"']+)[\\\"']",
       "patch": {
         "path": "third_party/patches/mimicgen-local.patch",
-        "sha256": "ed30d32cc919da7ddacbdadb1a1417ebdb704b6f45ed07c628182defb07d9e4f"
+        "sha256": "ad7475faaeeba8b023db81de70b1a3bc027295e782ce2eaa5341f435d1d3aed8"
       }
     },
     "cpgen-envs": {
@@ -42,7 +42,7 @@
       "version_regex": "__version__\\s*=\\s*[\\\"']([^\\\"']+)[\\\"']",
       "patch": {
         "path": "third_party/patches/cpgen-envs-rs14.patch",
-        "sha256": "e511432ffdea3a4cf6b2b006f3464f4471c42411ad56ea6f2ed4b19ae0e134db"
+        "sha256": "7cc34318df15189324f9d939985937907808b3f56a30a92264582fa222026312"
       }
     },
     "curobo": {
