@@ -8,6 +8,7 @@ from mink import Configuration
 from scipy.spatial.transform import Rotation as R
 
 from demo_aug.envs.motion_planners.base_mp import MotionPlanner
+from demo_aug.robosuite_backend import convert_frame_name_to_rs14
 
 
 class LongPathSlerp:
@@ -187,6 +188,12 @@ class EEFInterpMinkMotionPlanner(EEFInterpMotionPlanner):
                 that the IK solver is trying to reach. We select between "long" and "short" slerp based on which one has the
                 smallest sum of position and quaternion differences.
         """
+        eef_frame_name = convert_frame_name_to_rs14(eef_frame_name)
+        posture_cost = 1e-3
+        if retract_q_weights is not None:
+            posture_cost = robot_configuration.expand_robot_dof_cost(
+                retract_q_weights / 1e3
+            )
         tasks = [
             r_ee_task := mink.FrameTask(
                 frame_name=eef_frame_name,
@@ -197,7 +204,7 @@ class EEFInterpMinkMotionPlanner(EEFInterpMotionPlanner):
             ),
             posture_task := mink.PostureTask(
                 model=robot_configuration.model,
-                cost=1e-3 if retract_q_weights is None else retract_q_weights / 1e3,
+                cost=posture_cost,
             ),
         ]
         limits = [
@@ -206,7 +213,7 @@ class EEFInterpMinkMotionPlanner(EEFInterpMotionPlanner):
             # collision_avoidance_limit,
         ]
         if q_retract is not None:
-            posture_task.set_target(q_retract)
+            posture_task.set_target(robot_configuration.expand_robot_qpos(q_retract))
 
         robot_qs_lst = []
         eef_wxyz_xyzs_lst = []
@@ -249,7 +256,7 @@ class EEFInterpMinkMotionPlanner(EEFInterpMotionPlanner):
                 quat_diff_sum += quat_diff
                 if verbose:
                     print(f"pos_diff: {pos_diff}, quat_diff: {quat_diff}")
-                robot_qs.append(robot_configuration.q.copy())
+                robot_qs.append(robot_configuration.get_robot_qpos().copy())
                 # eef_wxyz_xyzs.append(wxyz_xyz)
             robot_qs_lst.append((robot_qs, pos_diff_sum + quat_diff_sum))
             eef_wxyz_xyzs_lst.append((eef_wxyz_xyzs, pos_diff_sum + quat_diff_sum))

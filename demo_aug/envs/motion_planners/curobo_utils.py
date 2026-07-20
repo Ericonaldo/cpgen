@@ -106,10 +106,18 @@ def mjmodel_to_mjgeoms(
             ].tolist()  # x_length, y_length, z_length
         elif geom_type == mujoco.mjtGeom.mjGEOM_MESH:
             mesh_id = mjmodel.geom_dataid[geom_id]
-            dimensions = mjmodel.mesh_scale[
-                mesh_id
-            ]  # mujoco is using m, curobo is using cm
-            file_path = get_path_from_pathsadr(mjmodel, mjmodel.mesh_pathadr[mesh_id])
+            if hasattr(mjmodel, "mesh_scale"):
+                dimensions = mjmodel.mesh_scale[mesh_id]
+                file_path = get_path_from_pathsadr(
+                    mjmodel, mjmodel.mesh_pathadr[mesh_id]
+                )
+            else:
+                start = mjmodel.mesh_vertadr[mesh_id]
+                stop = start + mjmodel.mesh_vertnum[mesh_id]
+                vertices = np.asarray(mjmodel.mesh_vert[start:stop])
+                dimensions = np.maximum(np.max(np.abs(vertices), axis=0), 1e-6)
+                geom_type = mujoco.mjtGeom.mjGEOM_BOX
+                file_path = None
         else:
             continue
 

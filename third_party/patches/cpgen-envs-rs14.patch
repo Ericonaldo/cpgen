@@ -1,0 +1,221 @@
+diff --git a/cpgen_envs/__init__.py b/cpgen_envs/__init__.py
+index cd26ed0..d5a1678 100644
+--- a/cpgen_envs/__init__.py
++++ b/cpgen_envs/__init__.py
+@@ -1,116 +1,3 @@
+-import sys
+-import cpgen_envs.environments.manipulation.single_arm_env as patched_module
+-sys.modules['robosuite.environments.manipulation.single_arm_env'] = patched_module
+-
+-
+-import cpgen_envs.environments.manipulation.nut_assembly
+-from cpgen_envs.environments.manipulation.hammer_cleanup import (
+-    HammerCleanup_D0 as HammerCleanup_D0,
+-)
+-from cpgen_envs.environments.manipulation.hammer_cleanup import (
+-    HammerCleanup_D1 as HammerCleanup_D1,
+-)
+-from cpgen_envs.environments.manipulation.mug_cleanup import (
+-    MugCleanup_D0 as MugCleanup_D0,
+-)
+-from cpgen_envs.environments.manipulation.mug_cleanup import (
+-    MugCleanup_D1 as MugCleanup_D1,
+-)
+-from cpgen_envs.environments.manipulation.nut_assembly import (
+-    NutAssembly_D0 as NutAssembly_D0,
+-)
+-from cpgen_envs.environments.manipulation.nut_assembly import (
+-    NutAssembly_D1 as NutAssembly_D1,
+-)
+-from cpgen_envs.environments.manipulation.nut_assembly import (
+-    Square_D0 as Square_D0,
+-    Square_D1 as Square_D1,
+-    # Square_D2 as Square_D2,
+-    SquareWide as SquareWide,
+-    # SquareReal as SquareReal
+-)
+-from cpgen_envs.environments.manipulation.three_piece_assembly import (
+-    ThreePieceAssembly as ThreePieceAssembly,
+-)
+-from cpgen_envs.environments.manipulation.coffee import (
+-    Coffee_D1 as Coffee_D1,
+-)
+-from cpgen_envs.environments.manipulation.coffee import (
+-    Coffee_D2 as Coffee_D2,
+-)
+-from cpgen_envs.environments.manipulation.threading import (
+-    Threading_D2 as Threading_D2,
+-)
+-from cpgen_envs.environments.manipulation.kitchen import (   
+-    Kitchen_D0 as Kitchen_D0,
+-)
+-from cpgen_envs.environments.manipulation.kitchen import (   
+-    Kitchen_D1 as Kitchen_D1,
+-)
+-from cpgen_envs.environments.manipulation.kitchen import (   
+-    KitchenWide as KitchenWide,
+-)
+-from cpgen_envs.environments.manipulation.stack import (   
+-    StackThreeWide as StackThreeWide,
+-)
+-from cpgen_envs.environments.manipulation.pouring import (   
+-    Pouring as Pouring,
+-)
+-from cpgen_envs.environments.manipulation.mug_hanging import (   
+-    MugHanging as MugHanging,
+-)
+-from cpgen_envs.environments.manipulation.wine_glass_hanging import (   
+-    WineGlassHanging as WineGlassHanging,
+-)
+-from mimicgen.envs.robosuite.pick_place import (
+-    PickPlace_D0 as PickPlace_D0,
+-)
+-
+-# override robosuite files
+-from robosuite.models.objects.xml_objects import (
+-    CanObject as CanObject,
+-    CerealObject as CerealObject,
+-    MilkObject as MilkObject,
+-)
+-
+-# register grippers
+-from cpgen_envs.models.grippers.panda_umi_gripper import PandaUmiGripper as PandaUmiGripper
+-
+-from robosuite.models.objects.xml_objects import MujocoXMLObject
+-import pathlib
+-
+-def can_obj_init(self, name):
+-    MujocoXMLObject.__init__(
+-        self,
+-        pathlib.Path(cpgen_envs.__file__).parent / "models" / "assets" / "objects" / "can.xml",
+-        name=name,
+-        joints=[dict(type="free", damping="0.0005")],
+-        obj_type="all",
+-        duplicate_collision_geoms=True,
+-    )
+-
+-def cereal_obj_init(self, name):
+-    MujocoXMLObject.__init__(
+-        self,
+-        pathlib.Path(cpgen_envs.__file__).parent / "models" / "assets" / "objects" / "cereal.xml",
+-        name=name,
+-        joints=[dict(type="free", damping="0.0005")],
+-        obj_type="all",
+-        duplicate_collision_geoms=True,
+-    )
+-
+-def milk_obj_init(self, name):
+-    MujocoXMLObject.__init__(
+-        self,
+-        pathlib.Path(cpgen_envs.__file__).parent / "models" / "assets" / "objects" / "milk.xml",
+-        name=name,
+-        joints=[dict(type="free", damping="0.0005")],
+-        obj_type="all",
+-        duplicate_collision_geoms=True,
+-    )
+-
+-CanObject.__init__ = can_obj_init
+-CerealObject.__init__ = cereal_obj_init
+-MilkObject.__init__ = milk_obj_init
++from cpgen_envs.environments.manipulation.nut_assembly import Square_D0, Square_D1
+ 
+ __version__ = "0.0.1"
+diff --git a/cpgen_envs/environments/manipulation/nut_assembly.py b/cpgen_envs/environments/manipulation/nut_assembly.py
+index 0394027..12b39a8 100644
+--- a/cpgen_envs/environments/manipulation/nut_assembly.py
++++ b/cpgen_envs/environments/manipulation/nut_assembly.py
+@@ -17,33 +17,14 @@ from robosuite.utils.placement_samplers import (
+     SequentialCompositeSampler,
+     UniformRandomSampler,
+ )
+-from robosuite.utils.robot_composition_utils import create_composite_robot
+-from robosuite.models.grippers.gripper_model import GripperModel
+-from robosuite.models.grippers.rethink_gripper import RethinkGripperBase
+ 
+ import cpgen_envs
+ from cpgen_envs.models.arenas.square_arena import SquareArenaReal, TableArenaReal
+ 
+ import xml.etree.ElementTree as ET
+ 
+-def __init__(self, idn=None):
+-    GripperModel.__init__(self, pathlib.Path(cpgen_envs.__file__).parent / "models/grippers/rethink_gripper.xml", idn=idn)
+-
+-RethinkGripperBase.__init__ = __init__
+-
+-from robosuite.models.robots.manipulators.manipulator_model import ManipulatorModel
+-
+-def __init__sawyer(self, idn=0):
+-    ManipulatorModel.__init__(self, pathlib.Path(cpgen_envs.__file__).parent / "models/robots/sawyer/robot.xml", idn=idn)
+-
+-from robosuite.models.robots.manipulators.sawyer_robot import Sawyer
+-Sawyer.__init__ = __init__sawyer
+-
+ from cpgen_envs.environments.manipulation.single_arm_env_mg import SingleArmEnv_MG
+ 
+-SquareNutObject.bottom_offset = np.array([0, 0, 0.01])
+-
+-
+ class NutAssembly_D0(NutAssembly, SingleArmEnv_MG):
+     """
+     Augment robosuite nut assembly task for mimicgen.
+diff --git a/cpgen_envs/environments/manipulation/real_env.py b/cpgen_envs/environments/manipulation/real_env.py
+index 9a4b902..a333bc5 100644
+--- a/cpgen_envs/environments/manipulation/real_env.py
++++ b/cpgen_envs/environments/manipulation/real_env.py
+@@ -2,8 +2,6 @@ import numpy as np
+ 
+ from robosuite.utils.mjcf_utils import array_to_string, string_to_array, xml_path_completion
+ from scipy.spatial.transform import Rotation as R
+-from robosuite.utils.robot_composition_utils import create_composite_robot
+-
+ import numpy as np
+ 
+ 
+@@ -36,6 +34,8 @@ class RealEnvMixin:
+         Panda.init_qpos = property(new_panda_init_qpos)
+ 
+     def _update_kwargs_for_real_robot(self, kwargs: dict) -> dict:
++        from robosuite.utils.robot_composition_utils import create_composite_robot
++
+         if "robots" in kwargs:
+             full_name = kwargs["robots"] if isinstance(kwargs["robots"], str) else kwargs["robots"][0]
+             parts = full_name.split("_")
+diff --git a/cpgen_envs/environments/manipulation/single_arm_env_mg.py b/cpgen_envs/environments/manipulation/single_arm_env_mg.py
+index 13a9d41..c4dc4b2 100644
+--- a/cpgen_envs/environments/manipulation/single_arm_env_mg.py
++++ b/cpgen_envs/environments/manipulation/single_arm_env_mg.py
+@@ -6,7 +6,7 @@ import os
+ import xml.etree.ElementTree as ET
+ 
+ import robosuite
+-from robosuite.environments.manipulation.manipulation_env import ManipulationEnv
++from robosuite.environments.manipulation.single_arm_env import SingleArmEnv
+ from robosuite.utils.mjcf_utils import string_to_array
+ 
+ try:
+@@ -18,7 +18,7 @@ except ImportError:
+ import mimicgen
+ import cpgen_envs
+ 
+-class SingleArmEnv_MG(ManipulationEnv):
++class SingleArmEnv_MG(SingleArmEnv):
+     """
+     Custom version of base class for single arm robosuite tasks for mimicgen.
+     """
+diff --git a/cpgen_envs/models/arenas/__init__.py b/cpgen_envs/models/arenas/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/setup.py b/setup.py
+index 5fb2dd1..bbbf7c0 100644
+--- a/setup.py
++++ b/setup.py
+@@ -12,8 +12,7 @@ setup(
+     name="cpgen_envs",
+     packages=find_packages(),
+     install_requires=[
+-        "robosuite>=1.5.0",
+-        "robosuite_task_zoo @ git+https://github.com/kevin-thankyou-lin/robosuite-task-zoo.git"
++        "robosuite==1.4.1",
+     ],
+     eager_resources=["*"],
+     include_package_data=True,

@@ -7,10 +7,19 @@ from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple, TypedDic
 import imageio
 import mujoco
 import numpy as np
-from openai import OpenAI
 from robomimic.envs.env_base import EnvBase
 
 from demo_aug.utils.mujoco_utils import get_top_level_body_names
+
+
+def _openai_client():
+    try:
+        from openai import OpenAI
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "LLM segmentation requires the optional 'openai' package"
+        ) from exc
+    return OpenAI()
 
 # Default keypoints definitions
 DEFAULT_OBJ_KEYPOINTS: List[List[List[float]]] = [
@@ -459,12 +468,6 @@ def create_constraint(
     return constraint
 
 
-if __name__ == "__main__":
-    # Simulation states + LLM demo segmentation
-
-    # --- OpenAI API Client ---
-    client = OpenAI()
-
 # --- Type Definitions ---
 SegmentType = Literal["motion", "skill"]
 
@@ -707,7 +710,7 @@ def choose_object_names(
 
     *Only* return the list. Begin.
     """
-    response = client.responses.create(model="gpt-4o", input=prompt)
+    response = _openai_client().responses.create(model="gpt-4o", input=prompt)
     output_text = response.output[0].content[0].text
     try:
         return json.loads(output_text)
@@ -797,7 +800,7 @@ def call_segmenter_api_llm_e2e(
 
     model = "o3-mini"
     # Step 2: LLM call
-    response = client.responses.create(
+    response = _openai_client().responses.create(
         model=model,
         input=prompt,
         # temperature=0.25,  # recommended for code-generation
@@ -979,7 +982,7 @@ Should return: ["gripper0_right_right_gripper:SquareNut_main", "SquareNut_main:p
 
 Only return the list. Begin.
 """
-    response = client.responses.create(model="gpt-4o", input=prompt)
+    response = _openai_client().responses.create(model="gpt-4o", input=prompt)
     output_text = response.output[0].content[0].text
     try:
         output_text = json.loads(output_text)
@@ -1044,7 +1047,7 @@ def call_segmenter_api_llm_success(
     model = "o3-mini"
     # model = "gpt-4o-mini-2024-07-18"
     # Step 2: LLM call
-    response = client.responses.create(
+    response = _openai_client().responses.create(
         model=model,
         input=prompt,
         reasoning={"effort": "medium"},
@@ -1296,7 +1299,7 @@ def call_segmenter_api_llm_ends_then_starts(
 
     # Step 3: Call the LLM
     model = "o3-mini"
-    response = client.responses.create(
+    response = _openai_client().responses.create(
         model=model,
         input=prompt,
         reasoning={"effort": "medium"},

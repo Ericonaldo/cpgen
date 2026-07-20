@@ -9,6 +9,8 @@ import robomimic.utils.obs_utils as ObsUtils
 from robomimic.config import config_factory
 from scipy.spatial.transform import Rotation
 
+from demo_aug.robosuite_backend import eef_site_name_for_rs14
+
 
 # Monkey patch robomimic get_camera_info to use v1.5.0
 def get_camera_info(
@@ -39,10 +41,8 @@ def get_camera_info(
         if "eye_in_hand" in cam_name:
             # convert extrinsic matrix to be relative to robot eef control frame
             assert cam_name.startswith("robot0")
-            eef_site_name = (
+            eef_site_name = eef_site_name_for_rs14(
                 env.base_env.robots[0]
-                .composite_controller.part_controllers["right"]
-                .ref_name
             )
             eef_pos = np.array(
                 env.base_env.sim.data.site_xpos[

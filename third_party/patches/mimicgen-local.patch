@@ -1,0 +1,20 @@
+diff --git a/mimicgen/datagen/data_generator.py b/mimicgen/datagen/data_generator.py
+index bc070812dce171e24b3aa81bba4ff91baae98626..d3d708331f0ce0e197573c712f4b18eab0cc2793 100644
+--- a/mimicgen/datagen/data_generator.py
++++ b/mimicgen/datagen/data_generator.py
+@@ -306,13 +306,12 @@ class DataGenerator(object):
+                 # we will interpolate to the first robot eef pose in this source segment, instead of the
+                 # first robot target pose.
+                 src_eef_poses = np.concatenate([src_subtask_eef_poses[0:1], src_subtask_target_poses], axis=0)
++                # account for extra timestep added to @src_eef_poses
++                src_subtask_gripper_actions = np.concatenate([src_subtask_gripper_actions[0:1], src_subtask_gripper_actions], axis=0)
+             else:
+                 # Source segment consists of just the target poses.
+                 src_eef_poses = np.array(src_subtask_target_poses)
+ 
+-            # account for extra timestep added to @src_eef_poses
+-            src_subtask_gripper_actions = np.concatenate([src_subtask_gripper_actions[0:1], src_subtask_gripper_actions], axis=0)
+-
+             # Transform source demonstration segment using relevant object pose.
+             if subtask_object_name is not None:
+                 transformed_eef_poses = PoseUtils.transform_source_data_segment_using_object_pose(

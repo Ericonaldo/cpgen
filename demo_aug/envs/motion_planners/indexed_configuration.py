@@ -4,6 +4,8 @@ import mujoco
 import numpy as np
 from mink import Configuration
 
+from demo_aug.robosuite_backend import convert_frame_name_to_rs14
+
 
 class IndexedConfiguration(Configuration):
     """
@@ -18,6 +20,7 @@ class IndexedConfiguration(Configuration):
         model: mujoco.MjModel,
         q: Optional[np.ndarray] = None,
         robot_idxs: Optional[np.ndarray] = None,
+        robot_dof_idxs: Optional[np.ndarray] = None,
     ):
         """Constructor.
         Args:
@@ -32,6 +35,9 @@ class IndexedConfiguration(Configuration):
         if robot_idxs is None:
             robot_idxs = np.arange(model.nq)
         self.robot_idxs = robot_idxs
+        self.robot_dof_idxs = (
+            np.arange(model.nv) if robot_dof_idxs is None else robot_dof_idxs
+        )
         self.update(q=q, update_qpos_idxs=robot_idxs)
 
     def update(
@@ -62,3 +68,18 @@ class IndexedConfiguration(Configuration):
     def get_robot_qpos(self) -> np.ndarray:
         """Get the configuration vector."""
         return self.data.qpos[self.robot_idxs]
+
+    def expand_robot_qpos(self, robot_qpos: np.ndarray) -> np.ndarray:
+        expanded = self.data.qpos.copy()
+        expanded[self.robot_idxs] = robot_qpos
+        return expanded
+
+    def expand_robot_dof_cost(self, robot_cost: np.ndarray) -> np.ndarray:
+        expanded = np.zeros(self.model.nv)
+        expanded[self.robot_dof_idxs] = robot_cost
+        return expanded
+
+    def get_transform_frame_to_world(self, frame_name: str, frame_type: str):
+        return super().get_transform_frame_to_world(
+            convert_frame_name_to_rs14(frame_name), frame_type
+        )

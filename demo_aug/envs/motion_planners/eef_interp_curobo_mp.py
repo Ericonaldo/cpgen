@@ -14,6 +14,10 @@ from demo_aug.envs.motion_planners.base_mp import MotionPlanner
 from demo_aug.envs.motion_planners.curobo_mp import CuroboMotionPlanner
 from demo_aug.envs.motion_planners.eef_interp_mp import EEFInterpMinkMotionPlanner
 from demo_aug.envs.motion_planners.indexed_configuration import IndexedConfiguration
+from demo_aug.robosuite_backend import (
+    convert_frame_name_to_rs14,
+    managed_mujoco_renderer,
+)
 from demo_aug.utils.mujoco_utils import (
     check_geom_collisions,
     get_body_name,
@@ -60,7 +64,7 @@ def save_plan_video(
     qacc = data.qacc.copy()
 
     try:
-        with mujoco.Renderer(model) as renderer:
+        with managed_mujoco_renderer(mujoco.Renderer, model) as renderer:
             for joint_positions in plan:
                 # Update robot joint state
                 env.robots[0].set_robot_joint_positions(joint_positions)
@@ -244,7 +248,9 @@ class EEFInterpCuroboMotionPlanner(MotionPlanner):
         model = robot_configuration.model
         data = robot_configuration.data
         robot_geoms = get_subtree_geom_ids_by_group(
-            model, model.body("gripper0_right_right_gripper").id, group=0
+            model,
+            model.body(convert_frame_name_to_rs14("gripper0_right_right_gripper")).id,
+            group=0,
         )
         body_ids = get_top_level_bodies(model, exclude_prefixes=["robot", "gripper"])
         body_names = [get_body_name(model, body_id) for body_id in body_ids]
